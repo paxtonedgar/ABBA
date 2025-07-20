@@ -1,0 +1,82 @@
+# ABBA Configuration File
+
+# Database Configuration
+database:
+  host: localhost
+  port: 5432
+  name: abba_db
+  user: abba_user
+  password: abba_password
+
+# API Keys
+apis:
+  the_odds_api_key: "270031007830ad3ee2939f9aa01ee13a"
+  sportsdataio_key: "your_sportsdataio_key_here"
+  openweather_api_key: "3c8d675ef0356bc093de22653e14c7ac"
+  mlb_stats_api_key: "your_mlb_stats_key_here"
+
+# Model Configuration
+models:
+  xgboost:
+    n_estimators: 200
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+  random_forest:
+    n_estimators: 100
+    max_depth: 10
+    random_state: 42
+  gradient_boosting:
+    n_estimators: 150
+    max_depth: 5
+    learning_rate: 0.1
+    random_state: 42
+
+# Betting Configuration
+betting:
+  min_ev_threshold: 0.03
+  max_risk_per_bet: 0.01
+  kelly_fraction: 0.15
+  min_confidence: 0.75
+  bankroll: 10000
+  min_edge: 0.02
+  max_bet_size: 500
+  daily_loss_limit: 200
+  max_drawdown: 0.20
+  transaction_cost: 0.05
+  line_movement_slippage: 0.02
+  max_bets_per_day: 5
+  correlation_threshold: 0.7
+
+# Weather Configuration
+weather:
+  cache_duration: 3600  # 1 hour
+  impact_thresholds:
+    temperature_min: 40
+    temperature_max: 90
+    wind_speed_max: 20
+    humidity_max: 80
+    precipitation_threshold: 0.3
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(message)s"
+  file: logs/abba.log
+
+# Cache Configuration
+cache:
+  redis_host: localhost
+  redis_port: 6379
+  redis_db: 0
+  ttl: 3600
+
+# Feature Engineering
+features:
+  rolling_windows: [10, 30, 60]
+  min_games_for_stats: 5
+  park_factors_enabled: true
+  weather_impact_enabled: true
+  injury_impact_enabled: true 

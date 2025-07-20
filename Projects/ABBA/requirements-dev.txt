@@ -1,0 +1,17 @@
+# Development dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+black>=23.0.0
+ruff>=0.1.0
+mypy>=1.0.0
+pre-commit>=3.0.0
+coverage>=7.0.0
+
+# Optional ML dependencies
+torch>=2.1.0
+transformers>=4.35.0
+sentence-transformers>=2.2.0
+
+# Optional trading dependencies
+ccxt>=4.0.0 
