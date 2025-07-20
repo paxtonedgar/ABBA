@@ -708,8 +708,17 @@ class MLBettingRealityCheck:
         contingency_table = np.array([[both_correct, model_correct_vegas_wrong],
                                     [vegas_correct_model_wrong, both_wrong]])
         
-        # McNemar test
-        mcnemar_stat, mcnemar_pvalue = stats.mcnemar(contingency_table, exact=True)
+        # McNemar test (simplified)
+        try:
+            from statsmodels.stats.contingency_tables import mcnemar
+            mcnemar_result = mcnemar(contingency_table, exact=True)
+            mcnemar_stat = mcnemar_result.statistic
+            mcnemar_pvalue = mcnemar_result.pvalue
+        except ImportError:
+            # Fallback: simple chi-square test
+            chi2_stat, chi2_pvalue = stats.chi2_contingency(contingency_table)[:2]
+            mcnemar_stat = chi2_stat
+            mcnemar_pvalue = chi2_pvalue
         
         # Bootstrap confidence intervals for ROI
         n_bootstrap = 1000
