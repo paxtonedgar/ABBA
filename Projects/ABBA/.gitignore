@@ -161,7 +161,7 @@ cython_debug/
 #  *.ipr
 #  *.iws
 
-# ABMBA Specific
+# ABBA Specific
 # Configuration files with sensitive data
 config_local.yaml
 config_production.yaml
@@ -198,6 +198,36 @@ models/
 # Cache files
 cache/
 .cache/
+
+# Test artifacts
+test_models/
+validation_results/
+real_data/
+data_archive/
+results/
+
+# Example files (can be regenerated)
+examples/
+
+# Coverage and analysis files
+.coverage
+callgraph.dot
+audit_report.md
+inventory_report.md
+REFACTOR_SUMMARY.md
+htmlcov/
+
+# Analysis and migration files
+analyze_test_suite.py
+test_analysis_report.json
+MIGRATION_SUMMARY.md
+FINAL_MIGRATION_REPORT.md
+tests_audit.md
+radon.txt
+pylint_design.txt
+
+# Old MLB scripts
+mlb_2024_*.py
 *.cache
 
 # Temporary files

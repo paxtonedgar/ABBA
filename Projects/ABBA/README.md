@@ -274,4 +274,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Open source community
 - Beta testers and contributors
 
---- 
+---
