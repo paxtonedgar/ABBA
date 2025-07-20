@@ -1,0 +1,89 @@
+# Core dependencies
+asyncio
+aiohttp
+requests
+structlog
+beautifulsoup4
+pyyaml
+python-dotenv
+
+# Database
+sqlalchemy
+aiosqlite
+redis>=4.5.0
+
+# Machine Learning and Data Science
+scikit-learn>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+xgboost>=1.7.0
+shap>=0.41.0
+
+# Advanced ML and Neural Networks (2025)
+torch>=2.1.0
+torch-geometric>=2.3.0
+torch-scatter>=2.1.0
+torch-sparse>=0.6.0
+transformers>=4.35.0
+sentence-transformers>=2.2.0
+
+# Graph Neural Networks and Network Analysis
+networkx>=3.0
+dgl>=1.1.0
+spektral>=1.2.0
+
+# Bayesian Networks and Uncertainty Quantification
+pymc>=5.0.0
+arviz>=0.15.0
+emcee>=3.1.0
+
+# Biometrics and Real-time Data Processing
+biosppy>=0.2.0
+neurokit2>=0.2.0
+heartpy>=1.2.0
+
+# Sports Data APIs
+pybaseball>=2.2.0
+nhl-api>=0.0.1
+
+# AI/LLM
+openai
+langchain
+langchain-openai
+crewai
+dspy-ai>=2.4.0
+
+# Fairness and Bias Detection
+aif360>=0.5.0
+fairlearn>=0.8.0
+
+# Advanced Automation and Stealth
+playwright>=1.40.0
+playwright-stealth>=1.0.0
+selenium-stealth>=1.0.0
+undetected-chromedriver>=3.5.0
+browserbase>=0.1.0
+
+# Webhooks and Real-time Communication
+fastapi>=0.104.0
+uvicorn>=0.24.0
+websockets>=12.0
+
+# Sentiment Analysis and NLP
+textblob>=0.17.0
+vaderSentiment>=3.3.0
+spacy>=3.7.0
+
+# Time Series and Signal Processing
+statsmodels>=0.14.0
+scipy>=1.10.0
+pykalman>=0.9.0
+
+# Testing
+pytest
+pytest-asyncio
+
+# Utilities
+python-dateutil
+pytz 
