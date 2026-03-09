@@ -1,277 +1,182 @@
-# ABBA - Advanced Baseball Betting Analytics
+# ABBA
 
-A comprehensive sports betting analytics platform focused on MLB and NHL, featuring advanced machine learning, biometric integration, and real-time data processing.
+Sports analytics toolkit that AI agents call natively. DuckDB-backed data store, ensemble ML predictions, real-time odds scanning, and Kelly Criterion position sizing -- exposed as callable tools that any agent framework can discover and use.
 
-## 🚀 Features
+Solves the stale data problem: LLMs hallucinate sports records, get rosters wrong, and have no idea about recent outcomes. ABBA provides a live, queryable data layer the agent can trust, with freshness metadata on every response.
 
-- **Advanced Analytics**: Ensemble machine learning models with biometric integration
-- **Real-time Data**: Live sports data processing and odds analysis
-- **Personalization**: User-specific model training and pattern analysis
-- **Graph Analysis**: Team performance analysis using network theory
-- **Automation**: Browser automation for data collection and betting execution
-- **API Integration**: RESTful API for external integrations
+## Three ways to use it
 
-## 📚 Documentation
-
-### Core Documentation
-- **[Project Specification](docs/PROJECT_SPECIFICATION.md)** - Comprehensive system overview and requirements
-- **[System Analysis](docs/system-analysis.md)** - Architecture and design decisions
-- **[Implementation Plans](docs/implementation-plans.md)** - Development roadmap and phases
-
-### Sports Strategies
-- **[MLB Strategy](docs/mlb-strategy.md)** - Baseball betting strategies and analysis
-- **[NHL Strategy](docs/nhl-strategy.md)** - Hockey betting strategies and analysis
-
-### Technical Integration
-- **[Data Pipeline](docs/data-pipeline.md)** - Data processing and analytics pipeline
-- **[BrowserBase Integration](docs/browserbase-integration.md)** - Web automation setup
-- **[BrightData Integration](docs/brightdata-integration.md)** - Data collection services
-- **[Database Setup](docs/database-setup.md)** - Database configuration and management
-
-### Operations & Management
-- **[Fund Management](docs/fund-management.md)** - Bankroll management and risk control
-- **[Anti-Detection Security](docs/anti-detection-security.md)** - Stealth and security measures
-- **[Demo & Live Testing](docs/demo-live-testing.md)** - Testing procedures and validation
-- **[Professional Analytics](docs/professional-analytics.md)** - Advanced analytics features
-
-### Development & Testing
-- **[Validation Testing](docs/validation-testing.md)** - Testing framework and procedures
-- **[Debugging Guide](docs/debugging.md)** - Troubleshooting and debugging
-- **[Balance Monitoring](docs/BALANCE_MONITORING_SUMMARY.md)** - Account balance tracking
-
-## 📦 Installation
-
-### Prerequisites
-
-- Python 3.10 or higher
-- pip or poetry
-
-### Quick Start
-
-```bash
-# Clone the repository
-git clone https://github.com/abba-team/abba.git
-cd abba
-
-# Install dependencies
-pip install -e .
-
-# Install development dependencies
-pip install -e ".[dev]"
-
-# Setup pre-commit hooks
-pre-commit install
-```
-
-### Environment Setup
-
-Create a `.env` file in the project root:
-
-```env
-# API Keys
-OPENAI_API_KEY=your_openai_key_here
-BROWSERBASE_API_KEY=your_browserbase_key_here
-
-# Database
-DATABASE_URL=sqlite:///abba.db
-REDIS_URL=redis://localhost:6379
-
-# Logging
-LOG_LEVEL=INFO
-LOG_FILE=logs/abba.log
-
-# Sports Configuration
-SUPPORTED_SPORTS=MLB,NHL
-
-# Trading Configuration
-MAX_BET_AMOUNT=100.0
-RISK_TOLERANCE=0.1
-```
-
-## 🏗️ Project Structure
-
-```
-abba/
-├── src/abba/                 # Main package
-│   ├── core/                 # Core functionality
-│   │   ├── config.py        # Configuration management
-│   │   └── logging.py       # Logging setup
-│   ├── analytics/           # Analytics modules
-│   │   ├── manager.py       # Analytics manager
-│   │   ├── biometrics.py    # Biometric processing
-│   │   ├── personalization.py # User personalization
-│   │   ├── ensemble.py      # Ensemble methods
-│   │   ├── graph.py         # Graph analysis
-│   │   └── models.py        # Data models
-│   ├── trading/             # Trading algorithms
-│   ├── agents/              # AI agents
-│   ├── data/                # Data processing
-│   ├── utils/               # Utilities
-│   └── api/                 # API endpoints
-├── tests/                   # Test suite
-│   ├── unit/               # Unit tests
-│   └── integration/        # Integration tests
-├── examples/               # Example scripts
-├── docs/                   # Documentation
-├── pyproject.toml          # Project configuration
-├── requirements-dev.txt    # Development dependencies
-└── README.md              # This file
-```
-
-## 🧪 Testing
-
-Run the test suite:
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=src/abba --cov-report=html
-
-# Run specific test categories
-pytest -m unit
-pytest -m integration
-pytest -m "not slow"
-```
-
-## 🔧 Development
-
-### Code Quality
-
-The project uses modern Python development tools:
-
-- **Black**: Code formatting
-- **Ruff**: Linting and import sorting
-- **MyPy**: Type checking
-- **Pre-commit**: Git hooks for code quality
-
-```bash
-# Format code
-black src/ tests/
-
-# Lint code
-ruff check src/ tests/
-
-# Type check
-mypy src/
-
-# Run all quality checks
-pre-commit run --all-files
-```
-
-### Adding New Features
-
-1. Create feature branch: `git checkout -b feature/new-feature`
-2. Implement feature with tests
-3. Run quality checks: `pre-commit run --all-files`
-4. Submit pull request
-
-## 📊 Usage Examples
-
-### Basic Analytics
-
+**1. Direct Python import** (most stable)
 ```python
-from abba import AdvancedAnalyticsManager
-from abba.core import Config
+from abba import ABBAToolkit
 
-# Initialize
-config = Config()
-analytics = AdvancedAnalyticsManager(config, db_manager)
+toolkit = ABBAToolkit()
+tools = toolkit.list_tools()  # discover available tools
 
-# Process biometric data
-biometric_data = {
-    'heart_rate': [75, 78, 82, 79, 76],
-    'fatigue_metrics': {'sleep_quality': 0.8, 'stress_level': 0.3},
-    'movement': {'total_distance': 5000, 'avg_speed': 2.1}
+games = toolkit.query_games(sport="MLB", status="scheduled")
+prediction = toolkit.predict_game(game_id="mlb-2026-04-12-NYY-BOS")
+value = toolkit.find_value(sport="MLB", min_ev=0.03)
+sizing = toolkit.kelly_sizing(win_probability=0.62, decimal_odds=2.10)
+```
+
+**2. HTTP REST API** (language-agnostic)
+```bash
+pip install abba
+abba-server  # starts on :8420
+
+# Discovery
+curl localhost:8420/tools
+
+# Call a tool
+curl -X POST localhost:8420/tools/call \
+  -d '{"name": "predict_game", "arguments": {"game_id": "mlb-2026-04-12-NYY-BOS"}}'
+```
+
+**3. MCP server** (for Claude Desktop / MCP-compatible agents)
+```json
+{
+  "mcpServers": {
+    "abba": {
+      "command": "python",
+      "args": ["-m", "abba.server.mcp"],
+      "env": {"ABBA_DB_PATH": "abba.duckdb"}
+    }
+  }
 }
-
-features = await analytics.integrate_biometrics(biometric_data)
 ```
 
-### Ensemble Predictions
+MCP is the standard but it's fragile in practice -- stdio transport loses state on crash, reconnection isn't standardized, and most agent frameworks have incomplete support. The Python import and HTTP interfaces are production-stable fallbacks that provide the exact same tools.
 
-```python
-# Create ensemble model
-ensemble = await analytics.create_ensemble_model([
-    'random_forest', 'gradient_boosting'
-])
+## Tools
 
-# Make prediction
-prediction = await analytics.ensemble_predictions(ensemble, features)
-print(f"Prediction: {prediction.value:.4f} ± {prediction.error_margin:.4f}")
+| Tool | Category | Description |
+|------|----------|-------------|
+| `query_games` | data | Games with filters (sport, date, team, status) |
+| `query_odds` | data | Current odds across sportsbooks |
+| `query_team_stats` | data | Team performance stats |
+| `list_sources` | data | Available data tables and row counts |
+| `describe_dataset` | data | Column schema for a table |
+| `predict_game` | analytics | Ensemble prediction (home win probability) |
+| `explain_prediction` | analytics | Feature importance breakdown |
+| `graph_analysis` | analytics | Team network metrics (centrality, cohesion) |
+| `find_value` | market | Scan for +EV opportunities |
+| `compare_odds` | market | Cross-sportsbook line comparison |
+| `calculate_ev` | market | Expected value for a specific bet |
+| `kelly_sizing` | market | Optimal position size (half-Kelly, capped) |
+| `session_budget` | meta | Remaining compute budget |
+
+## What the agent actually does
+
+```
+Agent: "Find me the best MLB bets for tonight"
+
+1. calls list_sources()                    -> sees games, odds, team_stats tables
+2. calls query_games(sport="MLB")          -> 5 scheduled games
+3. calls find_value(sport="MLB")           -> 2 opportunities with edge > 3%
+4. calls explain_prediction(game_id=...)   -> pitcher matchup driving the edge
+5. calls kelly_sizing(prob=0.62, odds=2.1) -> recommends $420 stake (half-Kelly)
 ```
 
-### Personalization
+Six tool calls. Each returns structured JSON the agent reasons over. No raw data dumps, no context window waste.
 
-```python
-# Analyze user patterns
-user_history = [...]  # User's betting history
-patterns = await analytics.personalize_models(user_history)
+## Architecture
 
-# Create personalized model
-personalized_model = await analytics.personalization_engine.create_model(patterns)
+```
+Agent (Claude / GPT / LangGraph / custom)
+    |
+    |-- Python SDK ---- ABBAToolkit ----+
+    |-- HTTP REST ----- /tools/call ----+
+    +-- MCP stdio ----- JSON-RPC -------+
+                                        |
+                              +---------v---------+
+                              |   Tool Dispatch    |
+                              |   (13 tools)       |
+                              +--------+-----------+
+                                       |
+                    +------------------+------------------+
+                    v                  v                  v
+              +----------+     +------------+     +----------+
+              |  Engine   |     |  Storage   |     | Connectors|
+              |          |     |  (DuckDB)  |     | (live data)|
+              | Ensemble  |     |  games     |     | MLB API   |
+              | Features  |     |  odds      |     | NHL API   |
+              | Kelly     |     |  stats     |     | Odds API  |
+              | Value     |     |  cache     |     | Weather   |
+              | Graph     |     |  sessions  |     |           |
+              +----------+     +------------+     +----------+
 ```
 
-## 🤝 Contributing
+## Engine math
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+**Ensemble predictions**: 4 models combined via inverse-variance weighting. Model 1 uses log5 (the baseball standard for head-to-head probability). Model 2 uses Pythagorean expectation. Model 3 uses recent form weighting. Model 4 adds weather adjustment. Confidence intervals via t-distribution.
 
-### Development Setup
+**Kelly Criterion**: Half-Kelly by default with 5% bankroll cap. Full Kelly formula: `f* = (bp - q) / b`. Won't bet below 2% edge or 3% EV threshold.
 
-1. Fork the repository
-2. Create a virtual environment: `python -m venv venv`
-3. Activate it: `source venv/bin/activate` (Linux/Mac) or `venv\Scripts\activate` (Windows)
-4. Install in development mode: `pip install -e ".[dev]"`
-5. Run tests: `pytest`
+**Graph analysis**: scipy shortest_path for closeness centrality, Brandes' algorithm for betweenness, scipy.linalg.eigh for eigenvector centrality. Matrix method (`A^3` diagonal) for clustering coefficient.
 
-### Code Style
+**Expected value**: `EV = P(win) * (odds - 1) - P(loss)`. Scans all sportsbooks against model probability to find positive EV with minimum edge threshold.
 
-- Follow PEP 8 guidelines
-- Use type hints for all functions
-- Write docstrings for all public functions
-- Keep functions under 50 lines when possible
-- Use meaningful variable names
+## Data layer
 
-## 📈 Performance
+DuckDB embedded columnar database. Fast analytical queries over millions of rows without a server process. Parquet-native for cheap historical archival.
 
-### Benchmarks
+Auto-seeds with realistic sample data on first boot (deterministic random seed, reproducible). In production, live connectors refresh from:
+- MLB Stats API (free, no auth, real-time games + standings)
+- NHL Stats API (free, no auth)
+- The Odds API (API key, 500 req/mo free tier)
+- OpenWeather (API key, 1000 calls/day free)
 
-- **Model Training**: < 30 seconds for standard ensemble
-- **Prediction Latency**: < 100ms for real-time predictions
-- **Data Processing**: 1000+ records/second
-- **Memory Usage**: < 2GB for typical workloads
+Every query response includes freshness metadata so agents know how stale the data is.
 
-### Optimization
+## Local development
 
-- Use async/await for I/O operations
-- Implement caching for expensive computations
-- Batch process data when possible
-- Use vectorized operations with NumPy
+```bash
+git clone https://github.com/paxtonedgar/ABBA.git
+cd ABBA/Projects/ABBA
+pip install -e ".[dev]"
+pytest  # 77 tests
+```
 
-## 🔒 Security
+```bash
+# Start HTTP server
+python -m abba.server.http
 
-- API keys stored in environment variables
-- Input validation on all endpoints
-- Rate limiting for API calls
-- Secure database connections
-- Regular security audits
+# Or use directly
+python -c "
+from abba import ABBAToolkit
+tk = ABBAToolkit()
+print(tk.find_value(sport='MLB'))
+"
+```
 
-## 📄 License
+## Project structure
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```
+Projects/ABBA/
+  src/abba/
+    server/           # tool interfaces
+      toolkit.py      # ABBAToolkit (main entry point, 13 tools)
+      mcp.py          # MCP stdio server
+      http.py         # HTTP REST server
+    engine/           # analytics compute
+      ensemble.py     # inverse-variance weighted model combining
+      features.py     # feature engineering (log5, pythagorean, weather)
+      kelly.py        # Kelly Criterion position sizing
+      value.py        # expected value scanning
+      graph.py        # team network analysis (scipy)
+    storage/
+      duckdb.py       # embedded columnar store
+    connectors/
+      seed.py         # deterministic sample data
+      live.py         # live data source adapters
+  tests/
+    test_engine.py    # math correctness (33 tests)
+    test_storage.py   # DuckDB operations (11 tests)
+    test_toolkit.py   # integration + agent workflow (23 tests)
+    test_mcp.py       # protocol + SDK (10 tests)
+  pyproject.toml
+```
 
-## 🆘 Support
+## License
 
-- **Documentation**: [https://abba.readthedocs.io](https://abba.readthedocs.io)
-- **Issues**: [GitHub Issues](https://github.com/abba-team/abba/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/abba-team/abba/discussions)
-- **Email**: support@abba.com
-
-## 🙏 Acknowledgments
-
-- Sports data providers
-- Open source community
-- Beta testers and contributors
-
----
+MIT

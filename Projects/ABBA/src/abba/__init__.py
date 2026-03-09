@@ -1,45 +1,18 @@
 """
-ABBA - Advanced Baseball Betting Analytics
+ABBA - Sports Analytics Toolkit for AI Agents
 
-A comprehensive sports betting analytics platform focused on MLB and NHL.
+Agent-callable analytics tools for sports betting analysis.
+DuckDB-backed, ensemble ML predictions, Kelly Criterion sizing.
+
+Usage:
+    from abba import ABBAToolkit
+    toolkit = ABBAToolkit()
+    tools = toolkit.list_tools()
+    result = toolkit.call_tool("predict_game", game_id="...")
 """
 
-__version__ = "1.0.0"
-__author__ = "ABBA Team"
-__email__ = "support@abba.com"
+__version__ = "2.0.0"
 
-# Core imports
-from .core.config import Config
-from .core.logging import setup_logging
+from .server.toolkit import ABBAToolkit
 
-# Analytics imports
-try:
-    from .analytics.advanced_analytics import AdvancedAnalyticsManager
-    from .analytics.manager import AnalyticsManager
-except ImportError:
-    pass  # Analytics module not available
-
-# API imports
-try:
-    from .api.real_time_connector import RealTimeConnector
-except ImportError:
-    pass  # API module not available
-
-# Agents modules imports
-try:
-    from .agents_modules.dynamic_orchestrator import DynamicOrchestrator
-    from .agents_modules.guardrail_agent import GuardrailAgent
-    from .agents_modules.reflection_agent import ReflectionAgent
-except ImportError:
-    pass  # Agents modules not available
-
-__all__ = [
-    "Config",
-    "setup_logging",
-    "AnalyticsManager",
-    "AdvancedAnalyticsManager",
-    "RealTimeConnector",
-    "DynamicOrchestrator",
-    "GuardrailAgent",
-    "ReflectionAgent",
-]
+__all__ = ["ABBAToolkit"]
