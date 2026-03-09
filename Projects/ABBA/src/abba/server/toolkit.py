@@ -10,6 +10,9 @@ it instantiates ABBAToolkit which:
 Each tool method returns a plain dict that agents can reason over.
 Tool discovery is via list_tools() which returns schema for every tool.
 
+Architecture: tool methods live in mixin classes under server/tools/.
+ABBAToolkit composes all mixins to present a single unified API.
+
 Usage:
     from abba.server import ABBAToolkit
     toolkit = ABBAToolkit()          # boots with sample data
@@ -22,6 +25,7 @@ import time
 from typing import Any
 
 from ..connectors.seed import seed_sample_data
+from ..engine.elo import EloRatings
 from ..engine.ensemble import EnsembleEngine
 from ..engine.features import FeatureEngine
 from ..engine.graph import GraphEngine
@@ -29,12 +33,36 @@ from ..engine.hockey import HockeyAnalytics
 from ..engine.kelly import KellyEngine
 from ..engine.value import ValueEngine
 from ..storage import Storage
+from .tools import (
+    AnalyticsToolsMixin,
+    DataToolsMixin,
+    MarketToolsMixin,
+    NHLToolsMixin,
+    SessionToolsMixin,
+    ToolRegistryMixin,
+)
 
 
-class ABBAToolkit:
+class ABBAToolkit(
+    DataToolsMixin,
+    AnalyticsToolsMixin,
+    MarketToolsMixin,
+    NHLToolsMixin,
+    SessionToolsMixin,
+    ToolRegistryMixin,
+):
     """Agent-callable sports analytics toolkit.
 
     Instantiate once, call tools by name. Each tool returns a dict.
+
+    Tool methods are organized into mixins:
+    - DataToolsMixin: query_games, query_odds, query_team_stats, list_sources, describe_dataset
+    - AnalyticsToolsMixin: predict_game, explain_prediction, graph_analysis
+    - MarketToolsMixin: find_value, compare_odds, calculate_ev, kelly_sizing
+    - NHLToolsMixin: nhl_predict_game, query_goaltender_stats, query_advanced_stats,
+                     query_cap_data, query_roster, season_review, playoff_odds
+    - SessionToolsMixin: refresh_data, run_workflow, list_workflows, session_budget
+    - ToolRegistryMixin: list_tools, call_tool
     """
 
     VERSION = "2.0.0"
@@ -52,6 +80,7 @@ class ABBAToolkit:
         self.value = ValueEngine()
         self.graph = GraphEngine()
         self.hockey = HockeyAnalytics()
+        self.elo = EloRatings(k=6, home_advantage=50)
 
         # Create default session
         self._session_id = "default"
@@ -62,6 +91,17 @@ class ABBAToolkit:
             game_count = next((t["row_count"] for t in tables if t["table"] == "games"), 0)
             if game_count == 0:
                 seed_sample_data(self.storage)
+
+        # Initialize Elo ratings from completed games
+        self._init_elo()
+
+    def _init_elo(self) -> None:
+        """Initialize Elo ratings from completed NHL games in storage."""
+        completed = self.storage.query_games(sport="NHL", status="final", limit=500)
+        if not completed:
+            return
+        games = sorted(completed, key=lambda g: g.get("date", ""))
+        self.elo.initialize_from_games(games)
 
     def _track(self, tool_name: str, params: dict, result: dict, start: float) -> dict:
         """Track tool call for observability."""
@@ -82,803 +122,69 @@ class ABBAToolkit:
         }
         return result
 
-    # =====================================================================
-    # DATA TOOLS
-    # =====================================================================
-
-    def query_games(
-        self,
-        sport: str | None = None,
-        date: str | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        team: str | None = None,
-        status: str | None = None,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        """Query games with filters. Returns structured game list."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        games = self.storage.query_games(
-            sport=sport, date=date, date_from=date_from, date_to=date_to,
-            team=team, status=status, limit=limit,
-        )
-        result = {"games": games, "count": len(games)}
-        return self._track("query_games", params, result, start)
-
-    def query_odds(
-        self,
-        game_id: str | None = None,
-        sportsbook: str | None = None,
-        latest_only: bool = True,
-    ) -> dict[str, Any]:
-        """Query odds snapshots. Returns current lines across books."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        odds = self.storage.query_odds(game_id=game_id, sportsbook=sportsbook, latest_only=latest_only)
-        result = {"odds": odds, "count": len(odds)}
-        return self._track("query_odds", params, result, start)
-
-    def query_team_stats(
-        self,
-        team_id: str | None = None,
-        sport: str | None = None,
-        season: str | None = None,
-    ) -> dict[str, Any]:
-        """Query team statistics."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        stats = self.storage.query_team_stats(team_id=team_id, sport=sport, season=season)
-        result = {"teams": stats, "count": len(stats)}
-        return self._track("query_team_stats", params, result, start)
-
-    def list_sources(self) -> dict[str, Any]:
-        """Schema discovery -- list available data tables and row counts."""
-        start = time.time()
-        tables = self.storage.list_tables()
-        result = {"sources": tables}
-        return self._track("list_sources", {}, result, start)
-
-    def describe_dataset(self, table: str) -> dict[str, Any]:
-        """Describe a data table's columns and types."""
-        start = time.time()
-        columns = self.storage.describe_table(table)
-        result = {"table": table, "columns": columns}
-        return self._track("describe_dataset", {"table": table}, result, start)
-
-    # =====================================================================
-    # ANALYTICS TOOLS
-    # =====================================================================
-
-    def predict_game(
-        self,
-        game_id: str,
-        method: str = "weighted",
-    ) -> dict[str, Any]:
-        """Ensemble prediction for a game. Returns home win probability."""
-        start = time.time()
-
-        # Get game
-        games = self.storage.query_games()
-        game = next((g for g in games if g.get("game_id") == game_id), None)
-        if not game:
-            return self._track("predict_game", {"game_id": game_id},
-                               {"error": f"game not found: {game_id}"}, start)
-
-        sport = game.get("sport", "MLB")
-        home = game.get("home_team", "")
-        away = game.get("away_team", "")
-
-        # Get team stats
-        home_stats_list = self.storage.query_team_stats(team_id=home, sport=sport)
-        away_stats_list = self.storage.query_team_stats(team_id=away, sport=sport)
-
-        home_stats = home_stats_list[0] if home_stats_list else {"stats": {}}
-        away_stats = away_stats_list[0] if away_stats_list else {"stats": {}}
-
-        # Get weather
-        weather = self.storage.get_weather(game_id)
-
-        # Build features
-        features = self.features.build_features(home_stats, away_stats, weather, sport)
-
-        # Generate model predictions
-        model_preds = self.features.predict_from_features(features)
-
-        # Check cache
-        data_hash = self.ensemble.data_hash(game_id, self.VERSION, features)
-        cached = self.storage.get_cached_prediction(game_id, self.VERSION, data_hash)
-        if cached:
-            cached["_cache_hit"] = True
-            return self._track("predict_game", {"game_id": game_id}, cached, start)
-
-        # Combine
-        prediction = self.ensemble.combine(model_preds, method=method)
-
-        result = {
-            "game_id": game_id,
-            "home_team": home,
-            "away_team": away,
-            "sport": sport,
-            "prediction": prediction.to_dict(),
-            "features": {k: round(v, 4) for k, v in features.items()},
-            "_cache_hit": False,
-        }
-
-        # Cache it
-        self.storage.cache_prediction(game_id, self.VERSION, data_hash, result)
-
-        return self._track("predict_game", {"game_id": game_id}, result, start)
-
-    def explain_prediction(self, game_id: str) -> dict[str, Any]:
-        """Explain what's driving a prediction -- feature importance."""
-        start = time.time()
-        pred = self.predict_game(game_id)
-        if "error" in pred:
-            return self._track("explain_prediction", {"game_id": game_id}, pred, start)
-
-        features = pred.get("features", {})
-
-        # Rank features by absolute deviation from neutral
-        neutral = {
-            "home_win_pct": 0.5, "away_win_pct": 0.5,
-            "home_run_diff_per_game": 0.0, "away_run_diff_per_game": 0.0,
-            "home_recent_form": 0.5, "away_recent_form": 0.5,
-            "home_advantage": 0.54,
-            "temp_impact": 0.0, "wind_impact": 0.0, "precip_risk": 0.0,
-        }
-
-        importance = []
-        for feat, val in features.items():
-            n = neutral.get(feat, 0.0)
-            deviation = abs(val - n)
-            direction = "favors_home" if val > n else "favors_away" if val < n else "neutral"
-            importance.append({
-                "feature": feat,
-                "value": val,
-                "neutral_value": n,
-                "deviation": round(deviation, 4),
-                "direction": direction,
-                "description": self.features.FEATURE_SCHEMA.get(feat, ""),
-            })
-
-        importance.sort(key=lambda x: x["deviation"], reverse=True)
-
-        result = {
-            "game_id": game_id,
-            "home_team": pred.get("home_team"),
-            "away_team": pred.get("away_team"),
-            "prediction": pred.get("prediction"),
-            "top_factors": importance[:5],
-            "all_factors": importance,
-        }
-        return self._track("explain_prediction", {"game_id": game_id}, result, start)
-
-    def graph_analysis(self, team_data: dict[str, Any]) -> dict[str, Any]:
-        """Team network analysis. Pass players + relationships."""
-        start = time.time()
-        result = self.graph.analyze_team(team_data)
-        return self._track("graph_analysis", {"player_count": len(team_data.get("players", []))},
-                           result, start)
-
-    # =====================================================================
-    # NHL-SPECIFIC TOOLS
-    # =====================================================================
-
-    def nhl_predict_game(
-        self,
-        game_id: str,
-        method: str = "weighted",
-    ) -> dict[str, Any]:
-        """NHL-specific prediction using Corsi, xG, goaltender, special teams, and rest features."""
-        start = time.time()
-
-        games = self.storage.query_games()
-        game = next((g for g in games if g.get("game_id") == game_id), None)
-        if not game:
-            return self._track("nhl_predict_game", {"game_id": game_id},
-                               {"error": f"game not found: {game_id}"}, start)
-
-        if game.get("sport") != "NHL":
-            return self._track("nhl_predict_game", {"game_id": game_id},
-                               {"error": "not an NHL game, use predict_game for other sports"}, start)
-
-        home = game.get("home_team", "")
-        away = game.get("away_team", "")
-
-        # Get all data sources
-        home_stats_list = self.storage.query_team_stats(team_id=home, sport="NHL")
-        away_stats_list = self.storage.query_team_stats(team_id=away, sport="NHL")
-        home_stats = home_stats_list[0] if home_stats_list else {"stats": {}}
-        away_stats = away_stats_list[0] if away_stats_list else {"stats": {}}
-
-        home_adv_list = self.storage.query_nhl_advanced_stats(team_id=home)
-        away_adv_list = self.storage.query_nhl_advanced_stats(team_id=away)
-        home_adv = home_adv_list[0].get("stats", {}) if home_adv_list else None
-        away_adv = away_adv_list[0].get("stats", {}) if away_adv_list else None
-
-        # Get starter goaltenders
-        home_goalies = self.storage.query_goaltender_stats(team=home)
-        away_goalies = self.storage.query_goaltender_stats(team=away)
-        home_goalie = next(
-            (g["stats"] for g in home_goalies if g.get("stats", {}).get("role") == "starter"),
-            home_goalies[0]["stats"] if home_goalies else None,
-        )
-        away_goalie = next(
-            (g["stats"] for g in away_goalies if g.get("stats", {}).get("role") == "starter"),
-            away_goalies[0]["stats"] if away_goalies else None,
-        )
-
-        # Build comprehensive NHL features
-        features = self.hockey.build_nhl_features(
-            home_stats, away_stats,
-            home_advanced=home_adv, away_advanced=away_adv,
-            home_goalie=home_goalie, away_goalie=away_goalie,
-        )
-
-        # Generate 6 NHL-specific model predictions
-        model_preds = self.hockey.predict_nhl_game(features)
-
-        # Check cache
-        data_hash = self.ensemble.data_hash(game_id, self.VERSION, features)
-        cached = self.storage.get_cached_prediction(game_id, self.VERSION + "-nhl", data_hash)
-        if cached:
-            cached["_cache_hit"] = True
-            return self._track("nhl_predict_game", {"game_id": game_id}, cached, start)
-
-        # Combine
-        prediction = self.ensemble.combine(model_preds, method=method)
-
-        result = {
-            "game_id": game_id,
-            "home_team": home,
-            "away_team": away,
-            "sport": "NHL",
-            "prediction": prediction.to_dict(),
-            "features": {k: round(v, 4) for k, v in features.items()},
-            "home_goaltender": home_goalie.get("name") if home_goalie else "unknown",
-            "away_goaltender": away_goalie.get("name") if away_goalie else "unknown",
-            "model_count": 6,
-            "model_types": [
-                "points_log5", "pythagorean", "corsi_driven",
-                "xg_driven", "goaltender_matchup", "combined_adjusted",
-            ],
-            "_cache_hit": False,
-        }
-
-        self.storage.cache_prediction(game_id, self.VERSION + "-nhl", data_hash, result)
-        return self._track("nhl_predict_game", {"game_id": game_id}, result, start)
-
-    def query_goaltender_stats(
-        self,
-        team: str | None = None,
-        goaltender_id: str | None = None,
-        season: str | None = None,
-    ) -> dict[str, Any]:
-        """Query NHL goaltender stats (Sv%, GAA, GSAA, xGSAA, quality starts)."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        goalies = self.storage.query_goaltender_stats(
-            goaltender_id=goaltender_id, team=team, season=season,
-        )
-        result = {"goaltenders": goalies, "count": len(goalies)}
-        return self._track("query_goaltender_stats", params, result, start)
-
-    def query_advanced_stats(
-        self,
-        team_id: str | None = None,
-        season: str | None = None,
-    ) -> dict[str, Any]:
-        """Query NHL advanced stats (Corsi, Fenwick, xG, PDO, score-adjusted)."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        stats = self.storage.query_nhl_advanced_stats(team_id=team_id, season=season)
-        result = {"teams": stats, "count": len(stats)}
-        return self._track("query_advanced_stats", params, result, start)
-
-    def query_cap_data(
-        self,
-        team: str | None = None,
-        season: str | None = None,
-        position: str | None = None,
-    ) -> dict[str, Any]:
-        """Query salary cap data with cap analysis."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        contracts = self.storage.query_salary_cap(team=team, season=season, position=position)
-
-        # Run cap analysis if querying a specific team
-        analysis = None
-        if team and contracts:
-            roster_for_analysis = [
-                {"name": c["name"], "position": c.get("position", ""),
-                 "cap_hit": c.get("cap_hit", 0),
-                 "contract_years_remaining": c.get("contract_years_remaining", 1),
-                 "status": c.get("status", "active")}
-                for c in contracts
-            ]
-            analysis = self.hockey.cap_analysis(roster_for_analysis)
-
-        result = {"contracts": contracts, "count": len(contracts)}
-        if analysis:
-            result["cap_analysis"] = analysis
-        return self._track("query_cap_data", params, result, start)
-
-    def query_roster(
-        self,
-        team: str | None = None,
-        season: str | None = None,
-        position: str | None = None,
-    ) -> dict[str, Any]:
-        """Query team roster with line combinations and injury status."""
-        start = time.time()
-        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
-        players = self.storage.query_roster(team=team, season=season, position=position)
-        result = {"players": players, "count": len(players)}
-        return self._track("query_roster", params, result, start)
-
-    def season_review(
-        self,
-        team_id: str,
-        season: str | None = None,
-    ) -> dict[str, Any]:
-        """Comprehensive NHL season review combining record, analytics, goaltending, and special teams."""
-        start = time.time()
-        season = season or "2025-26"
-
-        team_stats_list = self.storage.query_team_stats(team_id=team_id, sport="NHL", season=season)
-        if not team_stats_list:
-            return self._track("season_review", {"team_id": team_id},
-                               {"error": f"no stats found for {team_id}"}, start)
-
-        team_stats = team_stats_list[0].get("stats", {})
-
-        # Advanced stats
-        adv_list = self.storage.query_nhl_advanced_stats(team_id=team_id, season=season)
-        advanced = adv_list[0].get("stats", {}) if adv_list else None
-
-        # Goaltenders
-        goalies = self.storage.query_goaltender_stats(team=team_id, season=season)
-        goalie_stats = [g.get("stats", {}) for g in goalies] if goalies else None
-
-        review = self.hockey.season_review(team_stats, advanced, goalie_stats)
-        review["team_id"] = team_id
-        review["season"] = season
-
-        return self._track("season_review", {"team_id": team_id, "season": season}, review, start)
-
-    def playoff_odds(
-        self,
-        team_id: str,
-        season: str | None = None,
-        division_cutline: int = 90,
-        wildcard_cutline: int = 95,
-    ) -> dict[str, Any]:
-        """Estimate playoff probability from current points pace."""
-        start = time.time()
-        season = season or "2025-26"
-
-        team_stats_list = self.storage.query_team_stats(team_id=team_id, sport="NHL", season=season)
-        if not team_stats_list:
-            return self._track("playoff_odds", {"team_id": team_id},
-                               {"error": f"no stats found for {team_id}"}, start)
-
-        stats = team_stats_list[0].get("stats", {})
-        wins = stats.get("wins", 0)
-        losses = stats.get("losses", 0)
-        otl = stats.get("overtime_losses", 0)
-        gp = wins + losses + otl
-        points = wins * 2 + otl
-        remaining = 82 - gp
-
-        result = self.hockey.playoff_probability(
-            current_points=points,
-            games_remaining=remaining,
-            games_played=gp,
-            division_cutline=division_cutline,
-            wildcard_cutline=wildcard_cutline,
-        )
-        result["team_id"] = team_id
-        result["season"] = season
-        return self._track("playoff_odds", {"team_id": team_id}, result, start)
-
-    # =====================================================================
-    # MARKET TOOLS
-    # =====================================================================
-
-    def find_value(
-        self,
-        sport: str | None = None,
-        date: str | None = None,
-        min_ev: float = 0.03,
-    ) -> dict[str, Any]:
-        """Scan for +EV betting opportunities."""
-        start = time.time()
-
-        games = self.storage.query_games(sport=sport, date=date, status="scheduled")
-        if not games:
-            return self._track("find_value", {"sport": sport, "date": date},
-                               {"opportunities": [], "count": 0, "games_scanned": 0}, start)
-
-        # Get predictions for all games
-        predictions: dict[str, float] = {}
-        for g in games:
-            gid = g.get("game_id", "")
-            pred = self.predict_game(gid)
-            pred_data = pred.get("prediction", {})
-            if isinstance(pred_data, dict) and "value" in pred_data:
-                predictions[gid] = pred_data["value"]
-
-        # Get all odds
-        all_odds = self.storage.query_odds(latest_only=True)
-
-        # Find value
-        self.value.min_ev = min_ev
-        opportunities = self.value.find_value(games, predictions, all_odds)
-
-        result = {
-            "opportunities": opportunities[:20],
-            "count": len(opportunities),
-            "games_scanned": len(games),
-        }
-        return self._track("find_value", {"sport": sport, "min_ev": min_ev}, result, start)
-
-    def compare_odds(self, game_id: str) -> dict[str, Any]:
-        """Compare odds across sportsbooks for a game."""
-        start = time.time()
-        all_odds = self.storage.query_odds(game_id=game_id, latest_only=True)
-        result = self.value.compare_odds(all_odds, game_id)
-        return self._track("compare_odds", {"game_id": game_id}, result, start)
-
-    def calculate_ev(
-        self,
-        win_probability: float,
-        decimal_odds: float,
-    ) -> dict[str, Any]:
-        """Calculate expected value for a specific bet."""
-        start = time.time()
-        ev = win_probability * (decimal_odds - 1.0) - (1.0 - win_probability)
-        implied = 1.0 / decimal_odds if decimal_odds > 0 else 0
-        edge = win_probability - implied
-
-        result = {
-            "win_probability": round(win_probability, 4),
-            "decimal_odds": round(decimal_odds, 4),
-            "implied_probability": round(implied, 4),
-            "edge": round(edge, 4),
-            "expected_value": round(ev, 4),
-            "is_positive_ev": ev > 0,
-        }
-        return self._track("calculate_ev",
-                           {"win_probability": win_probability, "decimal_odds": decimal_odds},
-                           result, start)
-
-    def kelly_sizing(
-        self,
-        win_probability: float,
-        decimal_odds: float,
-        bankroll: float = 10000.0,
-    ) -> dict[str, Any]:
-        """Calculate optimal position size using Kelly Criterion."""
-        start = time.time()
-        sizing = self.kelly.calculate(win_probability, decimal_odds, bankroll)
-        result = sizing.to_dict()
-        result["bankroll"] = bankroll
-        result["decimal_odds"] = decimal_odds
-        result["win_probability"] = round(win_probability, 4)
-        return self._track("kelly_sizing",
-                           {"win_probability": win_probability, "decimal_odds": decimal_odds,
-                            "bankroll": bankroll}, result, start)
-
-    # =====================================================================
-    # SESSION / META TOOLS
-    # =====================================================================
-
-    def refresh_data(
-        self,
-        source: str = "all",
-        team: str | None = None,
-    ) -> dict[str, Any]:
-        """Refresh data from live sources. NHL API is free, Odds API needs a key."""
-        start = time.time()
-        from ..connectors.live import NHLLiveConnector, OddsLiveConnector
-
-        results: dict[str, Any] = {}
-
-        if source in ("nhl", "all"):
-            nhl = NHLLiveConnector()
-            try:
-                nhl_result = nhl.refresh(self.storage, team=team)
-                results["nhl"] = nhl_result
-            except Exception as e:
-                results["nhl"] = {"error": str(e)}
-
-        if source in ("odds", "all"):
-            odds = OddsLiveConnector()
-            try:
-                odds_result = odds.refresh(self.storage)
-                results["odds"] = odds_result
-            except Exception as e:
-                results["odds"] = {"error": str(e)}
-
-        result = {"refreshed_sources": list(results.keys()), "details": results}
-        return self._track("refresh_data", {"source": source, "team": team}, result, start)
-
-    def run_workflow(self, workflow: str, **kwargs: Any) -> dict[str, Any]:
-        """Run a multi-step analytical workflow by name."""
-        start = time.time()
-        from ..workflows.engine import WorkflowEngine
-        engine = WorkflowEngine(self)
-        result = engine.run(workflow, **kwargs)
-        return self._track("run_workflow", {"workflow": workflow, **kwargs}, result, start)
-
-    def list_workflows(self) -> dict[str, Any]:
-        """List available multi-step workflows for agent discovery."""
-        start = time.time()
-        from ..workflows.engine import list_workflows
-        result = {"workflows": list_workflows()}
-        return self._track("list_workflows", {}, result, start)
-
-    def session_budget(self) -> dict[str, Any]:
-        """Check remaining session budget and usage."""
-        start = time.time()
-        session = self.storage.get_session(self._session_id)
-        result = {
-            "session_id": self._session_id,
-            "budget_remaining": round(session["budget_remaining"], 2) if session else 0,
-            "budget_total": session["budget_total"] if session else 0,
-            "tool_calls": session["tool_calls"] if session else 0,
-        }
-        return self._track("session_budget", {}, result, start)
-
-    # =====================================================================
-    # TOOL DISCOVERY
-    # =====================================================================
-
-    def list_tools(self) -> list[dict[str, Any]]:
-        """Return schema for all available tools. This is what agents
-        call first to understand what capabilities are available."""
-        return [
-            {
-                "name": "query_games",
-                "category": "data",
-                "description": "Query games with filters (sport, date, team, status)",
-                "params": {
-                    "sport": {"type": "string", "optional": True, "enum": ["MLB", "NHL"]},
-                    "date": {"type": "string", "optional": True, "format": "YYYY-MM-DD"},
-                    "date_from": {"type": "string", "optional": True},
-                    "date_to": {"type": "string", "optional": True},
-                    "team": {"type": "string", "optional": True},
-                    "status": {"type": "string", "optional": True, "enum": ["scheduled", "final"]},
-                    "limit": {"type": "integer", "optional": True, "default": 50},
-                },
-            },
-            {
-                "name": "query_odds",
-                "category": "data",
-                "description": "Query odds snapshots across sportsbooks",
-                "params": {
-                    "game_id": {"type": "string", "optional": True},
-                    "sportsbook": {"type": "string", "optional": True},
-                    "latest_only": {"type": "boolean", "optional": True, "default": True},
-                },
-            },
-            {
-                "name": "query_team_stats",
-                "category": "data",
-                "description": "Query team statistics (wins, losses, differentials)",
-                "params": {
-                    "team_id": {"type": "string", "optional": True},
-                    "sport": {"type": "string", "optional": True},
-                    "season": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "list_sources",
-                "category": "data",
-                "description": "List available data tables and row counts",
-                "params": {},
-            },
-            {
-                "name": "describe_dataset",
-                "category": "data",
-                "description": "Get column names and types for a data table",
-                "params": {"table": {"type": "string", "required": True}},
-            },
-            {
-                "name": "predict_game",
-                "category": "analytics",
-                "description": "Ensemble prediction for a game (home win probability)",
-                "params": {
-                    "game_id": {"type": "string", "required": True},
-                    "method": {"type": "string", "optional": True, "enum": ["weighted", "average", "median", "voting"], "default": "weighted"},
-                },
-            },
-            {
-                "name": "explain_prediction",
-                "category": "analytics",
-                "description": "Feature importance breakdown for a prediction",
-                "params": {"game_id": {"type": "string", "required": True}},
-            },
-            {
-                "name": "graph_analysis",
-                "category": "analytics",
-                "description": "Team network analysis (centrality, cohesion, key players)",
-                "params": {"team_data": {"type": "object", "required": True, "fields": ["players", "relationships"]}},
-            },
-            {
-                "name": "find_value",
-                "category": "market",
-                "description": "Scan for +EV betting opportunities across all games",
-                "params": {
-                    "sport": {"type": "string", "optional": True},
-                    "date": {"type": "string", "optional": True},
-                    "min_ev": {"type": "number", "optional": True, "default": 0.03},
-                },
-            },
-            {
-                "name": "compare_odds",
-                "category": "market",
-                "description": "Compare odds across sportsbooks for a game",
-                "params": {"game_id": {"type": "string", "required": True}},
-            },
-            {
-                "name": "calculate_ev",
-                "category": "market",
-                "description": "Calculate expected value for a specific bet",
-                "params": {
-                    "win_probability": {"type": "number", "required": True},
-                    "decimal_odds": {"type": "number", "required": True},
-                },
-            },
-            {
-                "name": "kelly_sizing",
-                "category": "market",
-                "description": "Calculate optimal bet size using Kelly Criterion",
-                "params": {
-                    "win_probability": {"type": "number", "required": True},
-                    "decimal_odds": {"type": "number", "required": True},
-                    "bankroll": {"type": "number", "optional": True, "default": 10000},
-                },
-            },
-            {
-                "name": "session_budget",
-                "category": "meta",
-                "description": "Check remaining session budget and call count",
-                "params": {},
-            },
-            # --- NHL-specific tools ---
-            {
-                "name": "nhl_predict_game",
-                "category": "analytics",
-                "description": "NHL-specific prediction using Corsi, xG, goaltender matchup, special teams, and rest",
-                "params": {
-                    "game_id": {"type": "string", "required": True},
-                    "method": {"type": "string", "optional": True, "default": "weighted"},
-                },
-            },
-            {
-                "name": "query_goaltender_stats",
-                "category": "data",
-                "description": "Query NHL goaltender stats (Sv%, GAA, GSAA, xGSAA, quality starts)",
-                "params": {
-                    "team": {"type": "string", "optional": True},
-                    "goaltender_id": {"type": "string", "optional": True},
-                    "season": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "query_advanced_stats",
-                "category": "data",
-                "description": "Query NHL advanced stats (Corsi, Fenwick, xG, PDO, score-adjusted)",
-                "params": {
-                    "team_id": {"type": "string", "optional": True},
-                    "season": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "query_cap_data",
-                "category": "data",
-                "description": "Query salary cap data with cap analysis (space, dead cap, top earners)",
-                "params": {
-                    "team": {"type": "string", "optional": True},
-                    "season": {"type": "string", "optional": True},
-                    "position": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "query_roster",
-                "category": "data",
-                "description": "Query team roster with line combinations, player stats, and injury status",
-                "params": {
-                    "team": {"type": "string", "optional": True},
-                    "season": {"type": "string", "optional": True},
-                    "position": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "season_review",
-                "category": "analytics",
-                "description": "Comprehensive NHL season review (record, analytics grades, goaltending, special teams)",
-                "params": {
-                    "team_id": {"type": "string", "required": True},
-                    "season": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "playoff_odds",
-                "category": "analytics",
-                "description": "Estimate playoff probability from current points pace (Monte Carlo simulation)",
-                "params": {
-                    "team_id": {"type": "string", "required": True},
-                    "season": {"type": "string", "optional": True},
-                    "division_cutline": {"type": "integer", "optional": True, "default": 90},
-                    "wildcard_cutline": {"type": "integer", "optional": True, "default": 95},
-                },
-            },
-            {
-                "name": "refresh_data",
-                "category": "data",
-                "description": "Refresh data from live sources (NHL API, Odds API). Requires API keys for some sources.",
-                "params": {
-                    "source": {"type": "string", "optional": True, "enum": ["nhl", "odds", "all"]},
-                    "team": {"type": "string", "optional": True},
-                },
-            },
-            {
-                "name": "run_workflow",
-                "category": "workflow",
-                "description": "Run a multi-step analytical workflow (game_prediction, season_story, value_scan, betting_strategy, etc.)",
-                "params": {
-                    "workflow": {"type": "string", "required": True,
-                                 "enum": ["game_prediction", "tonights_slate", "season_story", "value_scan",
-                                          "cap_strategy", "playoff_race", "goaltender_duel", "team_comparison",
-                                          "betting_strategy"]},
-                },
-            },
-            {
-                "name": "list_workflows",
-                "category": "workflow",
-                "description": "List available multi-step workflows with trigger phrases and parameters",
-                "params": {},
-            },
-        ]
-
-    def call_tool(self, tool_name: str, **kwargs: Any) -> dict[str, Any]:
-        """Dynamic tool dispatch -- call any tool by name.
-
-        This is the primary interface for agent frameworks that
-        discover tools via list_tools() then dispatch dynamically.
+    def _player_impact(self, team: str) -> dict[str, float]:
+        """Compute player-level impact features for a team.
+
+        Looks at roster injuries, top scorer availability, and depth.
+        Returns features that adjust prediction confidence.
         """
-        tool_map = {
-            "query_games": self.query_games,
-            "query_odds": self.query_odds,
-            "query_team_stats": self.query_team_stats,
-            "list_sources": self.list_sources,
-            "describe_dataset": self.describe_dataset,
-            "predict_game": self.predict_game,
-            "explain_prediction": self.explain_prediction,
-            "graph_analysis": self.graph_analysis,
-            "find_value": self.find_value,
-            "compare_odds": self.compare_odds,
-            "calculate_ev": self.calculate_ev,
-            "kelly_sizing": self.kelly_sizing,
-            "session_budget": self.session_budget,
-            # NHL-specific
-            "nhl_predict_game": self.nhl_predict_game,
-            "query_goaltender_stats": self.query_goaltender_stats,
-            "query_advanced_stats": self.query_advanced_stats,
-            "query_cap_data": self.query_cap_data,
-            "query_roster": self.query_roster,
-            "season_review": self.season_review,
-            "playoff_odds": self.playoff_odds,
-            "refresh_data": self.refresh_data,
-            "run_workflow": self.run_workflow,
-            "list_workflows": self.list_workflows,
+        roster = self.storage.query_roster(team=team)
+        if not roster:
+            return {"injury_impact": 0.0, "top_scorer_available": 1.0, "roster_completeness": 1.0}
+
+        total = len(roster)
+        healthy = [p for p in roster if p.get("injury_status", "healthy") == "healthy"]
+
+        # Sort skaters by points to find top contributors
+        skaters = [p for p in roster if p.get("position", "") not in ("G",)]
+        skaters_by_pts = sorted(
+            skaters,
+            key=lambda p: (p.get("stats") or {}).get("points", 0)
+            if isinstance(p.get("stats"), dict) else 0,
+            reverse=True,
+        )
+
+        # Top-10 skater availability
+        top_players = skaters_by_pts[:10]
+        top_healthy = sum(
+            1 for p in top_players if p.get("injury_status", "healthy") == "healthy"
+        )
+        top_scorer_available = top_healthy / max(len(top_players), 1)
+
+        # Injury impact: top-line players cost more
+        injury_impact = 0.0
+        for i, p in enumerate(skaters_by_pts):
+            if p.get("injury_status", "healthy") != "healthy":
+                weight = max(0.015 - i * 0.001, 0.003)
+                injury_impact += weight
+
+        # Goalie injury check
+        goalies = [p for p in roster if p.get("position") == "G"]
+        starter_injured = any(
+            g.get("injury_status", "healthy") != "healthy"
+            for g in goalies[:1]
+        )
+        if starter_injured:
+            injury_impact += 0.03
+
+        return {
+            "injury_impact": round(min(injury_impact, 0.10), 4),
+            "top_scorer_available": round(top_scorer_available, 3),
+            "roster_completeness": round(len(healthy) / max(total, 1), 3),
         }
 
-        fn = tool_map.get(tool_name)
-        if not fn:
-            return {"error": f"unknown tool: {tool_name}", "available": list(tool_map.keys())}
-
-        return fn(**kwargs)
+    @staticmethod
+    def _build_model_types(
+        model_preds: list[float],
+        elo_prob: float | None,
+        features: dict[str, float],
+    ) -> list[str]:
+        """Build the list of model type labels matching predict_nhl_game output."""
+        types = ["points_log5", "pythagorean", "recent_form",
+                 "goal_differential", "goaltender_matchup", "combined_adjusted"]
+        market = features.get("market_implied_prob", 0)
+        if market > 0 and 0.15 <= market <= 0.85:
+            types.append("market_implied")
+        if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
+            types.append("elo")
+        return types[:len(model_preds)]

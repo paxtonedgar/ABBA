@@ -14,6 +14,7 @@ import time
 from datetime import date, timedelta
 from typing import Any
 
+from ..engine.confidence import build_workflow_meta
 from ..server.toolkit import ABBAToolkit
 
 
@@ -48,7 +49,46 @@ class WorkflowEngine:
             "elapsed_ms": round((time.time() - start) * 1000, 1),
             "params": params,
         }
+
+        # Attach confidence metadata if the workflow produced prediction data
+        if "_confidence" not in result:
+            # Infer data sources from what was used
+            data_sources = []
+            confidence_from_pred = result.get("prediction", {}).get("confidence")
+            if confidence_from_pred:
+                # Single-game prediction workflows carry forward the prediction's confidence
+                result["_confidence"] = confidence_from_pred
+            else:
+                # Multi-step workflows: build from weakest link
+                # Check if any sub-result has seed/live indicators
+                has_goalie = any(
+                    k in result for k in ("home_goaltender", "goaltending", "goalie1")
+                )
+                data_sources = self._infer_data_sources(result)
+                result["_confidence"] = build_workflow_meta(
+                    workflow_name=workflow_name,
+                    data_sources_used=data_sources,
+                    steps_completed=len([k for k in result if not k.startswith("_")]),
+                    steps_total=len([k for k in result if not k.startswith("_")]),
+                    has_goalie_data=has_goalie,
+                )
+
         return result
+
+    @staticmethod
+    def _infer_data_sources(result: dict) -> list[str]:
+        """Infer which data sources were used from workflow result structure."""
+        sources: list[str] = []
+        # Check nested prediction confidence for source hints
+        conf = result.get("prediction", {})
+        if isinstance(conf, dict):
+            if conf.get("confidence", {}).get("data_freshness") == "seed":
+                sources.append("seed")
+            elif conf.get("confidence", {}).get("reliability_grade") in ("A", "B", "C"):
+                sources.append("live")
+        if not sources:
+            sources.append("seed")  # conservative default
+        return sources
 
     # =====================================================================
     # GAME PREDICTION WORKFLOW
@@ -98,6 +138,9 @@ class WorkflowEngine:
         home_goalies = self.toolkit.query_goaltender_stats(team=home)
         away_goalies = self.toolkit.query_goaltender_stats(team=away)
 
+        # 3b. Head-to-head season series
+        h2h = self._head_to_head(home, away)
+
         # 4. Rest/B2B detection
         rest_info = self._compute_rest(home, away)
 
@@ -145,6 +188,7 @@ class WorkflowEngine:
             },
             "prediction": prediction.get("prediction", {}),
             "features": prediction.get("features", {}),
+            "head_to_head": h2h,
             "rest": rest_info,
             "odds": odds,
             "ev": ev_result,
@@ -169,6 +213,12 @@ class WorkflowEngine:
             factors.append(f"{home} on a back-to-back (fatigue penalty)")
         if rest_info.get("away_b2b"):
             factors.append(f"{away} on a back-to-back (fatigue penalty)")
+
+        if h2h["games_played"] > 0:
+            factors.append(
+                f"Season series: {home} {h2h['home_team_wins']}-{h2h['away_team_wins']} vs {away}"
+                + (f" (last meeting: {h2h['last_meeting']})" if h2h["last_meeting"] else "")
+            )
 
         if ev_result and ev_result.get("is_positive_ev"):
             factors.append(f"+EV opportunity: {ev_result['expected_value']:.1%} edge")
@@ -772,6 +822,38 @@ class WorkflowEngine:
     # =====================================================================
     # HELPERS
     # =====================================================================
+
+    def _head_to_head(self, home: str, away: str) -> dict[str, Any]:
+        """Look up the season series between two teams."""
+        home_finished = self.toolkit.query_games(sport="NHL", team=home, status="final")
+        games = home_finished.get("games", [])
+
+        # Filter for games where the opponent is the other team
+        h2h_games = [
+            g for g in games
+            if (g["home_team"] == home and g["away_team"] == away)
+            or (g["home_team"] == away and g["away_team"] == home)
+        ]
+
+        home_wins = 0
+        away_wins = 0
+        last_meeting = ""
+
+        for g in h2h_games:
+            if _is_win(g, home):
+                home_wins += 1
+            else:
+                away_wins += 1
+            game_date = g.get("date", "")
+            if game_date and (not last_meeting or str(game_date) > last_meeting):
+                last_meeting = str(game_date)[:10]
+
+        return {
+            "games_played": len(h2h_games),
+            "home_team_wins": home_wins,
+            "away_team_wins": away_wins,
+            "last_meeting": last_meeting,
+        }
 
     def _compute_rest(self, home: str, away: str) -> dict[str, Any]:
         """Compute rest days and B2B status from recent games."""

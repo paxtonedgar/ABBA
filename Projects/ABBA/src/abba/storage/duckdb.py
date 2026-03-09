@@ -41,6 +41,7 @@ class Storage:
                 venue VARCHAR,
                 status VARCHAR DEFAULT 'scheduled',
                 metadata JSON,
+                source VARCHAR DEFAULT 'unknown',
                 ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -80,6 +81,7 @@ class Storage:
                 sport VARCHAR NOT NULL,
                 season VARCHAR NOT NULL,
                 stats JSON NOT NULL,
+                source VARCHAR DEFAULT 'unknown',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (team_id, sport, season)
             )
@@ -201,13 +203,14 @@ class Storage:
         for g in games:
             self.conn.execute("""
                 INSERT OR REPLACE INTO games (game_id, sport, date, home_team, away_team,
-                    home_score, away_score, venue, status, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    home_score, away_score, venue, status, metadata, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 g["game_id"], g["sport"], g["date"], g["home_team"], g["away_team"],
                 g.get("home_score"), g.get("away_score"), g.get("venue"),
                 g.get("status", "scheduled"),
                 json.dumps(g.get("metadata", {})),
+                g.get("source", "unknown"),
             ])
         return len(games)
 
@@ -357,9 +360,9 @@ class Storage:
             return 0
         for s in stats:
             self.conn.execute("""
-                INSERT OR REPLACE INTO team_stats (team_id, sport, season, stats)
-                VALUES (?, ?, ?, ?)
-            """, [s["team_id"], s["sport"], s["season"], json.dumps(s.get("stats", {}))])
+                INSERT OR REPLACE INTO team_stats (team_id, sport, season, stats, source)
+                VALUES (?, ?, ?, ?, ?)
+            """, [s["team_id"], s["sport"], s["season"], json.dumps(s.get("stats", {})), s.get("source", "unknown")])
         return len(stats)
 
     def query_team_stats(
@@ -648,6 +651,16 @@ class Storage:
                 row["stats"] = json.loads(row["stats"])
         return rows
 
+    # --- Direct lookups ---
+
+    def get_game_by_id(self, game_id: str) -> dict[str, Any] | None:
+        """Fetch a single game by ID. O(1) via primary key instead of scanning all games."""
+        result = self.conn.execute(
+            "SELECT * FROM games WHERE game_id = ?", [game_id]
+        ).fetchdf()
+        rows = result.to_dict("records") if len(result) > 0 else []
+        return rows[0] if rows else None
+
     # --- Schema discovery ---
 
     def list_tables(self) -> list[dict[str, Any]]:
@@ -667,7 +680,17 @@ class Storage:
             })
         return tables
 
+    # Known tables for SQL injection prevention
+    KNOWN_TABLES = {
+        "games", "odds_snapshots", "player_stats", "team_stats",
+        "weather", "predictions_cache", "sessions", "tool_call_log",
+        "goaltender_stats", "nhl_advanced_stats", "salary_cap", "roster",
+    }
+
     def describe_table(self, table_name: str) -> list[dict[str, Any]]:
+        # Validate table name against known schema to prevent SQL injection
+        if table_name not in self.KNOWN_TABLES:
+            return [{"error": f"unknown table: {table_name}"}]
         result = self.conn.execute(
             f"DESCRIBE {table_name}"
         ).fetchdf()

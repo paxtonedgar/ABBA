@@ -4,14 +4,24 @@ This test pulls REAL completed NHL games and standings from the live API,
 runs our prediction models against games that already happened, and measures
 how well the models actually perform.
 
-The backtest is honest because:
+KNOWN LIMITATION — LOOKAHEAD BIAS:
+    We fetch today's standings and use them to predict games from the recent
+    past. Those standings already incorporate the results of the games we are
+    predicting, which inflates model accuracy. A truly unbiased backtest would
+    require historical daily standings snapshots, which the public NHL API does
+    not provide. To mitigate:
+      - We use a SHORT lookback window (5 days) so the contamination is small
+        relative to the full-season standings.
+      - We document this bias prominently so consumers of these results know
+        the numbers are optimistic.
+
+The backtest is honest *within the above limitation* because:
 1. We use real data from the NHL API (not our seed data)
-2. Predictions are made using only data available BEFORE the game
-3. We measure calibration (predicted 60% -> should win ~60% of the time)
-4. We measure log loss (proper scoring rule, penalizes overconfidence)
-5. We measure AUC (discrimination ability)
-6. We report edge over baseline (home team always wins / coin flip)
-7. We test the full toolkit pipeline, not just the math functions
+2. We measure calibration (predicted 60% -> should win ~60% of the time)
+3. We measure log loss (proper scoring rule, penalizes overconfidence)
+4. We measure AUC (discrimination ability)
+5. We report edge over baseline (home team always wins / coin flip)
+6. We test the full toolkit pipeline, not just the math functions
 
 Requires internet access to fetch from api-web.nhle.com (free, no auth).
 """
@@ -48,8 +58,12 @@ def _fetch_json(url: str) -> Any:
         return json.loads(resp.read().decode())
 
 
-def _fetch_completed_games(days_back: int = 14) -> list[dict]:
-    """Fetch recent completed NHL games from the real API."""
+def _fetch_completed_games(days_back: int = 5) -> list[dict]:
+    """Fetch recent completed NHL games from the real API.
+
+    NOTE: days_back is kept small (default 5) to limit lookahead bias.
+    See module docstring for details.
+    """
     games = []
     today = date.today()
 
@@ -78,7 +92,11 @@ def _fetch_completed_games(days_back: int = 14) -> list[dict]:
 
 
 def _fetch_standings() -> dict[str, dict]:
-    """Fetch current standings for all teams."""
+    """Fetch current standings for all teams.
+
+    WARNING: These standings include results of games in our backtest window,
+    introducing lookahead bias. See module docstring.
+    """
     data = _fetch_json("https://api-web.nhle.com/v1/standings/now")
     teams = {}
     for entry in data.get("standings", []):
@@ -159,8 +177,11 @@ class TestBacktest:
 
     @pytest.fixture(scope="class")
     def backtest_data(self):
-        """Fetch real data once for all tests."""
-        games = _fetch_completed_games(days_back=14)
+        """Fetch real data once for all tests.
+
+        Uses a 5-day lookback to limit lookahead bias (see module docstring).
+        """
+        games = _fetch_completed_games(days_back=5)
         standings = _fetch_standings()
         return {"games": games, "standings": standings}
 
@@ -205,9 +226,31 @@ class TestBacktest:
         return results
 
     def test_has_enough_games(self, predictions):
-        """Need at least 20 games for meaningful backtest."""
-        assert len(predictions) >= 20, f"Only {len(predictions)} games, need 20+"
+        """Need at least 10 games for a meaningful (short-window) backtest."""
+        assert len(predictions) >= 10, f"Only {len(predictions)} games, need 10+"
         print(f"\nBacktest: {len(predictions)} completed NHL games")
+
+    def test_acknowledges_lookahead_bias(self, predictions):
+        """Document that this backtest has a known lookahead bias.
+
+        We use today's standings to predict games from the past 5 days.
+        Those game results are already baked into the standings, which means
+        the model has indirect access to the outcome. A proper fix would
+        require daily standings snapshots, which the public NHL API does not
+        expose.
+
+        This test exists purely as documentation — it always passes but prints
+        a warning so the bias is visible in every test run.
+        """
+        n = len(predictions)
+        dates = sorted(set(p["date"] for p in predictions))
+        print("\n*** LOOKAHEAD BIAS WARNING ***")
+        print(f"  Standings fetched: today ({date.today().isoformat()})")
+        print(f"  Games predicted:   {dates[0]} to {dates[-1]} ({n} games)")
+        print("  Standings INCLUDE results of these games.")
+        print("  Reported metrics are optimistic. See module docstring.")
+        # Always passes — this is a documentation test.
+        assert True
 
     def test_log_loss_better_than_coin_flip(self, predictions):
         """Our model should have lower log loss than predicting 50% every time."""
@@ -218,8 +261,8 @@ class TestBacktest:
         coin_flip_log_loss = _log_loss(y_true, [0.5] * len(y_true))
 
         print(f"\nLog loss: model={our_log_loss:.4f}, coin_flip={coin_flip_log_loss:.4f}")
-        # Our model should beat random guessing
-        assert our_log_loss < coin_flip_log_loss * 1.1, \
+        # Model must strictly beat coin flip — no slack multiplier.
+        assert our_log_loss < coin_flip_log_loss, \
             f"Model log loss ({our_log_loss:.4f}) worse than coin flip ({coin_flip_log_loss:.4f})"
 
     def test_log_loss_better_than_always_home(self, predictions):
@@ -231,9 +274,9 @@ class TestBacktest:
         home_bias_log_loss = _log_loss(y_true, [0.55] * len(y_true))
 
         print(f"\nLog loss: model={our_log_loss:.4f}, home_55%={home_bias_log_loss:.4f}")
-        # This is a harder baseline -- we should be competitive
-        assert our_log_loss < home_bias_log_loss * 1.15, \
-            f"Model ({our_log_loss:.4f}) not competitive with home bias ({home_bias_log_loss:.4f})"
+        # Model must strictly beat the home-bias baseline.
+        assert our_log_loss < home_bias_log_loss, \
+            f"Model ({our_log_loss:.4f}) not better than home bias ({home_bias_log_loss:.4f})"
 
     def test_brier_score(self, predictions):
         """Brier score should be reasonable (< 0.30 for sports)."""
@@ -254,8 +297,8 @@ class TestBacktest:
         home_always_accuracy = sum(1 for p in predictions if p["home_won"]) / len(predictions)
 
         print(f"\nAccuracy: model={accuracy:.1%}, always_home={home_always_accuracy:.1%}")
-        # NHL is ~55% home win. Our model should be >= 50%
-        assert accuracy >= 0.45, f"Accuracy {accuracy:.1%} too low"
+        # 50% is random chance — the model must beat it.
+        assert accuracy >= 0.50, f"Accuracy {accuracy:.1%} below random chance (50%)"
 
     def test_calibration(self, predictions):
         """Check if predictions are well-calibrated."""
@@ -268,12 +311,15 @@ class TestBacktest:
             print(f"  {b['bin']}: predicted {b['predicted_avg']:.0%}, "
                   f"actual {b['actual_win_rate']:.0%} ({b['count']} games)")
 
-        # Average calibration error should be reasonable
+        # Weighted average calibration error must be < 15%.
+        # We weight by bin count so a bin with 1 game doesn't dominate.
         if bins:
-            avg_cal_error = np.mean([b["calibration_error"] for b in bins])
-            print(f"  Average calibration error: {avg_cal_error:.3f}")
-            # Sports predictions are inherently noisy, 15% error is acceptable
-            assert avg_cal_error < 0.25, f"Calibration error {avg_cal_error:.3f} too high"
+            total_games = sum(b["count"] for b in bins)
+            avg_cal_error = sum(
+                b["calibration_error"] * b["count"] for b in bins
+            ) / total_games
+            print(f"  Weighted avg calibration error: {avg_cal_error:.3f}")
+            assert avg_cal_error < 0.15, f"Calibration error {avg_cal_error:.3f} too high (max 0.15)"
 
     def test_model_diversity(self, predictions):
         """The 6 models should produce diverse predictions (not all identical)."""
@@ -287,27 +333,29 @@ class TestBacktest:
         assert avg_spread > 0.01, "Models are too similar -- no ensemble benefit"
 
     def test_favorites_win_more(self, predictions):
-        """Games where model is more confident should have higher win rate."""
-        confident = [p for p in predictions if abs(p["predicted_home_prob"] - 0.5) > 0.08]
-        uncertain = [p for p in predictions if abs(p["predicted_home_prob"] - 0.5) <= 0.08]
+        """Games where model is more confident should have higher win rate.
 
-        if len(confident) >= 10 and len(uncertain) >= 5:
+        When the model assigns >55% to either side, the favored side should
+        win more than 45% of the time (weak but real signal).
+        """
+        confident = [p for p in predictions if abs(p["predicted_home_prob"] - 0.5) > 0.05]
+
+        if len(confident) >= 5:
             conf_correct = sum(
                 1 for p in confident
                 if (p["predicted_home_prob"] > 0.5) == p["home_won"]
             ) / len(confident)
-            unc_correct = sum(
-                1 for p in uncertain
-                if (p["predicted_home_prob"] > 0.5) == p["home_won"]
-            ) / len(uncertain)
 
             print(f"\nConfident picks ({len(confident)}): {conf_correct:.1%} correct")
-            print(f"Uncertain picks ({len(uncertain)}): {unc_correct:.1%} correct")
-            # Confident picks should perform at least as well
-            # (in small samples this may not hold, so we're lenient)
+            assert conf_correct >= 0.45, (
+                f"Favorites (>{55}% predicted) only won {conf_correct:.1%} of the time; "
+                f"expected at least 45%"
+            )
+        else:
+            print(f"\nOnly {len(confident)} confident picks — skipping assertion (need >= 5)")
 
     def test_summary_report(self, predictions):
-        """Print a comprehensive backtest report."""
+        """Print a comprehensive backtest report and verify it contains key metrics."""
         y_true = [p["home_won"] for p in predictions]
         y_pred = [p["predicted_home_prob"] for p in predictions]
 
@@ -315,28 +363,94 @@ class TestBacktest:
         correct = sum(1 for t, p in zip(y_true, y_pred) if (p > 0.5) == t)
         home_wins = sum(y_true)
 
-        print("\n" + "=" * 60)
-        print("ABBA NHL BACKTEST REPORT")
-        print("=" * 60)
-        print(f"Games analyzed:     {n}")
-        print(f"Date range:         {predictions[-1]['date']} to {predictions[0]['date']}")
-        print(f"Home win rate:      {home_wins/n:.1%}")
-        print(f"Model accuracy:     {correct/n:.1%}")
-        print(f"Log loss:           {_log_loss(y_true, y_pred):.4f}")
-        print(f"Brier score:        {_brier_score(y_true, y_pred):.4f}")
-        print(f"Avg prediction:     {np.mean(y_pred):.3f}")
-        print(f"Prediction std:     {np.std(y_pred):.3f}")
-        print(f"Models used:        6 (log5, pyth, corsi, xG, goalie, combined)")
-        print(f"Data source:        api-web.nhle.com (live)")
-
-        # Baselines
-        print(f"\nBaselines:")
-        print(f"  Coin flip (50%):  {_log_loss(y_true, [0.5]*n):.4f} log loss")
-        print(f"  Home bias (55%):  {_log_loss(y_true, [0.55]*n):.4f} log loss")
-        print(f"  Always home:      {home_wins/n:.1%} accuracy")
-
         our_ll = _log_loss(y_true, y_pred)
-        coin_ll = _log_loss(y_true, [0.5]*n)
+        coin_ll = _log_loss(y_true, [0.5] * n)
         improvement = (coin_ll - our_ll) / coin_ll * 100
-        print(f"\nImprovement over coin flip: {improvement:+.1f}%")
-        print("=" * 60)
+
+        lines = []
+        lines.append("=" * 60)
+        lines.append("ABBA NHL BACKTEST REPORT")
+        lines.append("=" * 60)
+        lines.append(f"Games analyzed:     {n}")
+        lines.append(f"Date range:         {predictions[-1]['date']} to {predictions[0]['date']}")
+        lines.append(f"Home win rate:      {home_wins/n:.1%}")
+        lines.append(f"Model accuracy:     {correct/n:.1%}")
+        lines.append(f"Log loss:           {our_ll:.4f}")
+        lines.append(f"Brier score:        {_brier_score(y_true, y_pred):.4f}")
+        lines.append(f"Avg prediction:     {np.mean(y_pred):.3f}")
+        lines.append(f"Prediction std:     {np.std(y_pred):.3f}")
+        lines.append(f"Models used:        6 (log5, pyth, corsi, xG, goalie, combined)")
+        lines.append(f"Data source:        api-web.nhle.com (live)")
+        lines.append(f"*** Lookahead bias: YES (see module docstring) ***")
+        lines.append("")
+        lines.append(f"Baselines:")
+        lines.append(f"  Coin flip (50%):  {coin_ll:.4f} log loss")
+        lines.append(f"  Home bias (55%):  {_log_loss(y_true, [0.55]*n):.4f} log loss")
+        lines.append(f"  Always home:      {home_wins/n:.1%} accuracy")
+        lines.append("")
+        lines.append(f"Improvement over coin flip: {improvement:+.1f}%")
+        lines.append("=" * 60)
+
+        report = "\n".join(lines)
+        print("\n" + report)
+
+        # Assert the report contains key metrics
+        assert "Games analyzed" in report
+        assert "Log loss" in report
+        assert "Model accuracy" in report
+        assert "Improvement over coin flip" in report
+        assert "Lookahead bias" in report
+
+    def test_simulated_roi(self, predictions):
+        """Simulate flat-bet ROI when the model finds an edge vs implied odds.
+
+        For each game where the model's predicted probability exceeds the
+        implied probability by more than 3 percentage points, we simulate a
+        flat $100 bet on the model's pick. Implied odds are approximated from
+        a 55% home-win base rate (no real line data available).
+
+        We do NOT require positive ROI — that would be too strict for a model
+        without real closing-line data. Instead we assert the model does not
+        hemorrhage money (ROI > -30%).
+        """
+        BET_SIZE = 100.0
+        EDGE_THRESHOLD = 0.03
+        # Approximate implied probability: 55% home / 45% away (no real odds).
+        IMPLIED_HOME = 0.55
+
+        total_wagered = 0.0
+        total_returned = 0.0
+        bets_placed = 0
+
+        for p in predictions:
+            pred = p["predicted_home_prob"]
+
+            # Check for edge on home side
+            if pred - IMPLIED_HOME > EDGE_THRESHOLD:
+                total_wagered += BET_SIZE
+                bets_placed += 1
+                if p["home_won"]:
+                    # Fair-odds payout: BET_SIZE / implied_prob
+                    total_returned += BET_SIZE / IMPLIED_HOME
+            # Check for edge on away side
+            elif (1 - pred) - (1 - IMPLIED_HOME) > EDGE_THRESHOLD:
+                total_wagered += BET_SIZE
+                bets_placed += 1
+                if not p["home_won"]:
+                    total_returned += BET_SIZE / (1 - IMPLIED_HOME)
+
+        if total_wagered > 0:
+            roi = (total_returned - total_wagered) / total_wagered * 100
+        else:
+            roi = 0.0
+
+        print(f"\nSimulated ROI (flat $100 bets, >{EDGE_THRESHOLD:.0%} edge):")
+        print(f"  Bets placed:   {bets_placed}")
+        print(f"  Total wagered: ${total_wagered:,.0f}")
+        print(f"  Total returned: ${total_returned:,.0f}")
+        print(f"  ROI:           {roi:+.1f}%")
+        if bets_placed == 0:
+            print("  (No bets met the edge threshold — model is conservative)")
+
+        # Model should not hemorrhage money. -30% ROI is the floor.
+        assert roi > -30.0, f"Simulated ROI of {roi:+.1f}% is catastrophic (floor is -30%)"

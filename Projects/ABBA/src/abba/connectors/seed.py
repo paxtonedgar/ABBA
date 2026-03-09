@@ -98,6 +98,7 @@ def seed_sample_data(storage: Storage, days: int = 7) -> dict[str, int]:
                 "venue": NHL_TEAMS[home]["venue"],
                 "status": status,
                 "metadata": {},
+                "source": "seed",
             }
             if status == "final":
                 game["home_score"] = int(rng.integers(0, 6))
@@ -128,6 +129,7 @@ def seed_sample_data(storage: Storage, days: int = 7) -> dict[str, int]:
                 "era": round(float(rng.uniform(3.40, 4.60)), 2),
                 "recent_form": round(float(rng.uniform(0.35, 0.70)), 3),
             },
+            "source": "seed",
         })
     for tid, info in NHL_TEAMS.items():
         wins = int(rng.integers(35, 55))
@@ -151,6 +153,7 @@ def seed_sample_data(storage: Storage, days: int = 7) -> dict[str, int]:
                 "penalty_kill_percentage": round(float(rng.uniform(76, 88)), 1),
                 "recent_form": round(float(rng.uniform(0.35, 0.70)), 3),
             },
+            "source": "seed",
         })
     counts["team_stats"] = storage.upsert_team_stats(team_stats)
 

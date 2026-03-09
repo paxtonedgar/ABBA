@@ -53,12 +53,23 @@ class NHLLiveConnector:
     }
 
     def _fetch_json(self, url: str) -> dict[str, Any] | list[Any] | None:
-        """Fetch JSON from URL. Returns None on failure."""
+        """Fetch JSON from URL. Returns None on failure, stores last error."""
+        self._last_error: str | None = None
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "ABBA/2.0"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        except urllib.error.HTTPError as e:
+            self._last_error = f"HTTP {e.code}: {e.reason} ({url})"
+            return None
+        except urllib.error.URLError as e:
+            self._last_error = f"URL error: {e.reason} ({url})"
+            return None
+        except json.JSONDecodeError as e:
+            self._last_error = f"JSON decode error: {e} ({url})"
+            return None
+        except TimeoutError:
+            self._last_error = f"Timeout after 15s ({url})"
             return None
 
     def refresh(self, storage: Storage, team: str | None = None) -> dict[str, Any]:
@@ -87,7 +98,7 @@ class NHLLiveConnector:
         """Fetch current NHL standings and store as team stats."""
         data = self._fetch_json(f"{self.BASE_URL}/standings/now")
         if not data or "standings" not in data:
-            return {"status": "failed", "error": "could not fetch standings"}
+            return {"status": "failed", "error": self._last_error or "could not fetch standings"}
 
         team_stats = []
         for entry in data["standings"]:
@@ -95,7 +106,7 @@ class NHLLiveConnector:
             team_stats.append({
                 "team_id": abbrev,
                 "sport": "NHL",
-                "season": str(entry.get("seasonId", "20252026"))[:4] + "-" + str(entry.get("seasonId", "20252026"))[4:6],
+                "season": str(entry.get("seasonId", "20252026"))[:4] + "-" + str(entry.get("seasonId", "20252026"))[6:8],
                 "stats": {
                     "wins": entry.get("wins", 0),
                     "losses": entry.get("losses", 0),
@@ -124,6 +135,7 @@ class NHLLiveConnector:
                     "points_pct": entry.get("pointPctg", 0),
                     "recent_form": entry.get("l10Wins", 0) / max(entry.get("l10Wins", 0) + entry.get("l10Losses", 0) + entry.get("l10OtLosses", 0), 1),
                 },
+                "source": "nhl_api",
             })
 
         stored = storage.upsert_team_stats(team_stats)
@@ -136,7 +148,7 @@ class NHLLiveConnector:
 
         data = self._fetch_json(f"{self.BASE_URL}/schedule/{game_date}")
         if not data or "gameWeek" not in data:
-            return {"status": "failed", "error": "could not fetch schedule"}
+            return {"status": "failed", "error": self._last_error or "could not fetch schedule"}
 
         games = []
         for day_data in data.get("gameWeek", []):
@@ -165,6 +177,7 @@ class NHLLiveConnector:
                         "game_type": game.get("gameType", 0),
                         "tv_broadcasts": [b.get("network", "") for b in game.get("tvBroadcasts", [])],
                     },
+                    "source": "nhl_api",
                 }
 
                 if status == "final":
@@ -180,7 +193,7 @@ class NHLLiveConnector:
         """Fetch current roster for a team and store it."""
         data = self._fetch_json(f"{self.BASE_URL}/roster/{team}/current")
         if not data:
-            return {"status": "failed", "error": f"could not fetch roster for {team}"}
+            return {"status": "failed", "error": self._last_error or f"could not fetch roster for {team}"}
 
         players = []
         for position_group in ["forwards", "defensemen", "goalies"]:
