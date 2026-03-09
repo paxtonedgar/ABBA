@@ -137,6 +137,60 @@ class Storage:
             )
         """)
 
+        # --- NHL-specific tables ---
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS goaltender_stats (
+                goaltender_id VARCHAR NOT NULL,
+                team VARCHAR NOT NULL,
+                season VARCHAR NOT NULL,
+                stats JSON NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (goaltender_id, season)
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS nhl_advanced_stats (
+                team_id VARCHAR NOT NULL,
+                season VARCHAR NOT NULL,
+                stats JSON NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (team_id, season)
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS salary_cap (
+                player_id VARCHAR NOT NULL,
+                team VARCHAR NOT NULL,
+                season VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                position VARCHAR,
+                cap_hit DOUBLE,
+                aav DOUBLE,
+                contract_years_remaining INTEGER,
+                status VARCHAR DEFAULT 'active',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (player_id, season)
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS roster (
+                player_id VARCHAR NOT NULL,
+                team VARCHAR NOT NULL,
+                season VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                position VARCHAR,
+                line_number INTEGER,
+                stats JSON,
+                injury_status VARCHAR DEFAULT 'healthy',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (player_id, team, season)
+            )
+        """)
+
         # (sequences created above, before tables)
 
     # --- Games ---
@@ -438,6 +492,161 @@ class Storage:
             session_id, tool_name, json.dumps(input_params),
             json.dumps(output_summary), cost, latency_ms, cache_hit,
         ])
+
+    # --- Goaltender stats ---
+
+    def upsert_goaltender_stats(self, stats: list[dict[str, Any]]) -> int:
+        if not stats:
+            return 0
+        for s in stats:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO goaltender_stats (goaltender_id, team, season, stats)
+                VALUES (?, ?, ?, ?)
+            """, [s["goaltender_id"], s["team"], s["season"], json.dumps(s.get("stats", {}))])
+        return len(stats)
+
+    def query_goaltender_stats(
+        self,
+        goaltender_id: str | None = None,
+        team: str | None = None,
+        season: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        params = []
+        if goaltender_id:
+            conditions.append("goaltender_id = ?")
+            params.append(goaltender_id)
+        if team:
+            conditions.append("team ILIKE ?")
+            params.append(f"%{team}%")
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        result = self.conn.execute(f"SELECT * FROM goaltender_stats {where}", params).fetchdf()
+        rows = result.to_dict("records") if len(result) > 0 else []
+        for row in rows:
+            if isinstance(row.get("stats"), str):
+                row["stats"] = json.loads(row["stats"])
+        return rows
+
+    # --- NHL advanced stats ---
+
+    def upsert_nhl_advanced_stats(self, stats: list[dict[str, Any]]) -> int:
+        if not stats:
+            return 0
+        for s in stats:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO nhl_advanced_stats (team_id, season, stats)
+                VALUES (?, ?, ?)
+            """, [s["team_id"], s["season"], json.dumps(s.get("stats", {}))])
+        return len(stats)
+
+    def query_nhl_advanced_stats(
+        self,
+        team_id: str | None = None,
+        season: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        params = []
+        if team_id:
+            conditions.append("team_id = ?")
+            params.append(team_id)
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        result = self.conn.execute(f"SELECT * FROM nhl_advanced_stats {where}", params).fetchdf()
+        rows = result.to_dict("records") if len(result) > 0 else []
+        for row in rows:
+            if isinstance(row.get("stats"), str):
+                row["stats"] = json.loads(row["stats"])
+        return rows
+
+    # --- Salary cap ---
+
+    def upsert_salary_cap(self, contracts: list[dict[str, Any]]) -> int:
+        if not contracts:
+            return 0
+        for c in contracts:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO salary_cap
+                    (player_id, team, season, name, position, cap_hit, aav,
+                     contract_years_remaining, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                c["player_id"], c["team"], c["season"], c["name"],
+                c.get("position"), c.get("cap_hit", 0), c.get("aav", 0),
+                c.get("contract_years_remaining", 1), c.get("status", "active"),
+            ])
+        return len(contracts)
+
+    def query_salary_cap(
+        self,
+        team: str | None = None,
+        season: str | None = None,
+        position: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        params = []
+        if team:
+            conditions.append("team = ?")
+            params.append(team)
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        if position:
+            conditions.append("position = ?")
+            params.append(position)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        result = self.conn.execute(
+            f"SELECT * FROM salary_cap {where} ORDER BY cap_hit DESC", params
+        ).fetchdf()
+        return result.to_dict("records") if len(result) > 0 else []
+
+    # --- Roster ---
+
+    def upsert_roster(self, players: list[dict[str, Any]]) -> int:
+        if not players:
+            return 0
+        for p in players:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO roster
+                    (player_id, team, season, name, position, line_number, stats, injury_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                p["player_id"], p["team"], p["season"], p["name"],
+                p.get("position"), p.get("line_number"),
+                json.dumps(p.get("stats", {})), p.get("injury_status", "healthy"),
+            ])
+        return len(players)
+
+    def query_roster(
+        self,
+        team: str | None = None,
+        season: str | None = None,
+        position: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        params = []
+        if team:
+            conditions.append("team = ?")
+            params.append(team)
+        if season:
+            conditions.append("season = ?")
+            params.append(season)
+        if position:
+            conditions.append("position = ?")
+            params.append(position)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        result = self.conn.execute(
+            f"SELECT * FROM roster {where} ORDER BY line_number ASC, name", params
+        ).fetchdf()
+        rows = result.to_dict("records") if len(result) > 0 else []
+        for row in rows:
+            if isinstance(row.get("stats"), str):
+                row["stats"] = json.loads(row["stats"])
+        return rows
 
     # --- Schema discovery ---
 

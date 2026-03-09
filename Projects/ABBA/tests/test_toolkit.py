@@ -18,7 +18,7 @@ def toolkit():
 class TestToolDiscovery:
     def test_list_tools(self, toolkit):
         tools = toolkit.list_tools()
-        assert len(tools) >= 12
+        assert len(tools) >= 20
         names = [t["name"] for t in tools]
         assert "query_games" in names
         assert "predict_game" in names
@@ -169,6 +169,62 @@ class TestMarketTools:
         assert result["edge"] > 0
         # Stake should be reasonable (half-Kelly, capped at 5%)
         assert result["recommended_stake"] <= 500  # 5% of 10000
+
+
+class TestNHLTools:
+    def test_nhl_predict_game(self, toolkit):
+        games = toolkit.query_games(sport="NHL", status="scheduled")
+        if games["count"] == 0:
+            pytest.skip("no scheduled NHL games in seed data")
+        game_id = games["games"][0]["game_id"]
+        result = toolkit.nhl_predict_game(game_id)
+        assert "prediction" in result
+        assert result["model_count"] == 6
+
+    def test_nhl_predict_wrong_sport(self, toolkit):
+        games = toolkit.query_games(sport="MLB", status="scheduled")
+        game_id = games["games"][0]["game_id"]
+        result = toolkit.nhl_predict_game(game_id)
+        assert "error" in result
+
+    def test_query_goaltender_stats(self, toolkit):
+        result = toolkit.query_goaltender_stats()
+        assert result["count"] > 0
+        goalie = result["goaltenders"][0]
+        assert "stats" in goalie
+        assert "save_pct" in goalie["stats"]
+
+    def test_query_goaltender_by_team(self, toolkit):
+        result = toolkit.query_goaltender_stats(team="NYR")
+        assert result["count"] >= 1
+
+    def test_query_advanced_stats(self, toolkit):
+        result = toolkit.query_advanced_stats()
+        assert result["count"] > 0
+        team = result["teams"][0]
+        assert "corsi_pct" in team["stats"]
+        assert "xgf_pct" in team["stats"]
+
+    def test_query_cap_data(self, toolkit):
+        result = toolkit.query_cap_data(team="NYR")
+        assert result["count"] > 0
+        assert "cap_analysis" in result
+        assert result["cap_analysis"]["roster_size"] > 0
+
+    def test_query_roster(self, toolkit):
+        result = toolkit.query_roster(team="NYR")
+        assert result["count"] > 0
+
+    def test_season_review(self, toolkit):
+        result = toolkit.season_review(team_id="NYR")
+        assert "record" in result
+        assert "points" in result
+        assert "goal_differential" in result
+
+    def test_playoff_odds(self, toolkit):
+        result = toolkit.playoff_odds(team_id="NYR")
+        assert "wildcard_probability" in result
+        assert "projected_points" in result
 
 
 class TestSessionManagement:

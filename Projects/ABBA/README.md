@@ -11,12 +11,17 @@ Solves the stale data problem: LLMs hallucinate sports records, get rosters wron
 from abba import ABBAToolkit
 
 toolkit = ABBAToolkit()
-tools = toolkit.list_tools()  # discover available tools
+tools = toolkit.list_tools()  # discover all 21 tools
 
-games = toolkit.query_games(sport="MLB", status="scheduled")
-prediction = toolkit.predict_game(game_id="mlb-2026-04-12-NYY-BOS")
-value = toolkit.find_value(sport="MLB", min_ev=0.03)
-sizing = toolkit.kelly_sizing(win_probability=0.62, decimal_odds=2.10)
+# Pull real data from NHL API (free, no auth)
+toolkit.refresh_data(source="nhl", team="NYR")
+
+# Query live standings, predict games, find value
+games = toolkit.query_games(sport="NHL", status="scheduled")
+prediction = toolkit.nhl_predict_game(game_id=games["games"][0]["game_id"])
+review = toolkit.season_review(team_id="NYR")
+cap = toolkit.query_cap_data(team="NYR")
+roster = toolkit.query_roster(team="NYR")
 ```
 
 **2. HTTP REST API** (language-agnostic)
@@ -29,7 +34,7 @@ curl localhost:8420/tools
 
 # Call a tool
 curl -X POST localhost:8420/tools/call \
-  -d '{"name": "predict_game", "arguments": {"game_id": "mlb-2026-04-12-NYY-BOS"}}'
+  -d '{"name": "nhl_predict_game", "arguments": {"game_id": "nhl-2025021061"}}'
 ```
 
 **3. MCP server** (for Claude Desktop / MCP-compatible agents)
@@ -47,37 +52,108 @@ curl -X POST localhost:8420/tools/call \
 
 MCP is the standard but it's fragile in practice -- stdio transport loses state on crash, reconnection isn't standardized, and most agent frameworks have incomplete support. The Python import and HTTP interfaces are production-stable fallbacks that provide the exact same tools.
 
-## Tools
+## Tools (21)
 
-| Tool | Category | Description |
-|------|----------|-------------|
-| `query_games` | data | Games with filters (sport, date, team, status) |
-| `query_odds` | data | Current odds across sportsbooks |
-| `query_team_stats` | data | Team performance stats |
-| `list_sources` | data | Available data tables and row counts |
-| `describe_dataset` | data | Column schema for a table |
-| `predict_game` | analytics | Ensemble prediction (home win probability) |
-| `explain_prediction` | analytics | Feature importance breakdown |
-| `graph_analysis` | analytics | Team network metrics (centrality, cohesion) |
-| `find_value` | market | Scan for +EV opportunities |
-| `compare_odds` | market | Cross-sportsbook line comparison |
-| `calculate_ev` | market | Expected value for a specific bet |
-| `kelly_sizing` | market | Optimal position size (half-Kelly, capped) |
-| `session_budget` | meta | Remaining compute budget |
+### Data tools
+| Tool | Description |
+|------|-------------|
+| `query_games` | Games with filters (sport, date, team, status) |
+| `query_odds` | Current odds across sportsbooks |
+| `query_team_stats` | Team performance stats |
+| `query_goaltender_stats` | NHL goaltender stats (Sv%, GAA, GSAA, xGSAA) |
+| `query_advanced_stats` | NHL advanced stats (Corsi, Fenwick, xG, PDO) |
+| `query_cap_data` | Salary cap analysis (space, dead cap, top earners) |
+| `query_roster` | Team roster with line combinations and injuries |
+| `list_sources` | Available data tables and row counts |
+| `describe_dataset` | Column schema for a table |
+| `refresh_data` | Pull fresh data from live APIs (NHL, MLB, Odds) |
+
+### Analytics tools
+| Tool | Description |
+|------|-------------|
+| `predict_game` | Ensemble prediction (4 models, home win probability) |
+| `nhl_predict_game` | NHL-specific prediction (6 models: Corsi, xG, goaltender, special teams, rest) |
+| `explain_prediction` | Feature importance breakdown |
+| `graph_analysis` | Team network metrics (centrality, cohesion) |
+| `season_review` | Comprehensive NHL season review with analytics grades |
+| `playoff_odds` | Playoff probability via Monte Carlo simulation |
+
+### Market tools
+| Tool | Description |
+|------|-------------|
+| `find_value` | Scan for +EV opportunities |
+| `compare_odds` | Cross-sportsbook line comparison |
+| `calculate_ev` | Expected value for a specific bet |
+| `kelly_sizing` | Optimal position size (half-Kelly, capped) |
+| `session_budget` | Remaining compute budget |
+
+## Live data sources
+
+ABBA pulls from real APIs -- no hardcoded data in production:
+
+| Source | Auth | Data | Freshness |
+|--------|------|------|-----------|
+| NHL Stats API (`api-web.nhle.com`) | None (free) | Standings, schedule, rosters | Real-time |
+| MLB Stats API (`statsapi.mlb.com`) | None (free) | Standings, schedule, rosters | Real-time |
+| The Odds API | `ODDS_API_KEY` env var | Live odds from 20+ sportsbooks | 30 seconds |
+| OpenWeather | `OPENWEATHER_API_KEY` env var | Game-day weather | Hourly |
+
+```python
+# Pull fresh NHL data (free, no key needed)
+toolkit.refresh_data(source="nhl")
+
+# Pull live odds (needs API key)
+# export ODDS_API_KEY=your_key_here
+toolkit.refresh_data(source="odds")
+```
+
+Seed data is used for development and testing only -- deterministic (fixed random seed) for reproducible tests.
 
 ## What the agent actually does
 
 ```
-Agent: "Find me the best MLB bets for tonight"
+Agent: "How are the Rangers doing? Any good bets tonight?"
 
-1. calls list_sources()                    -> sees games, odds, team_stats tables
-2. calls query_games(sport="MLB")          -> 5 scheduled games
-3. calls find_value(sport="MLB")           -> 2 opportunities with edge > 3%
-4. calls explain_prediction(game_id=...)   -> pitcher matchup driving the edge
-5. calls kelly_sizing(prob=0.62, odds=2.1) -> recommends $420 stake (half-Kelly)
+1. calls refresh_data(source="nhl", team="NYR")    -> pulls live standings + roster
+2. calls season_review(team_id="NYR")              -> 24-30-8, 56 pts, analytics grades
+3. calls query_goaltender_stats(team="NYR")        -> Shesterkin .918 Sv%, 12.5 GSAA
+4. calls query_games(sport="NHL", status="scheduled") -> tonight's games
+5. calls nhl_predict_game(game_id="nhl-...")        -> 58% home win (6 models)
+6. calls find_value(sport="NHL")                    -> 2 +EV opportunities
+7. calls kelly_sizing(prob=0.58, odds=2.10)         -> recommends $320 (half-Kelly)
 ```
 
-Six tool calls. Each returns structured JSON the agent reasons over. No raw data dumps, no context window waste.
+Seven tool calls. Each returns structured JSON with freshness metadata. No hallucinated records.
+
+## NHL analytics depth
+
+The NHL engine (`engine/hockey.py`) provides comprehensive hockey analytics:
+
+**Shot metrics**: Corsi (all shot attempts at 5v5), Fenwick (unblocked attempts). CF%, CA%, per-60 rates, relative to league average.
+
+**Expected goals (xG)**: Calibrated logistic model using distance, angle, shot type, rebounds, rush chances, and game strength. Shot type multipliers: tip (1.4x), snap (1.05x), slap (0.85x), backhand (0.75x), wrap (0.45x). Rebounds are 2.5x base xG.
+
+**Goaltender model**: Sv%, GAA, GSAA (goals saved above average vs league 0.907), xGSAA (actual vs expected goals), quality start percentage. Goaltender matchup comparison for game prediction.
+
+**Special teams**: PP% and PK% with shot quality metrics (xG per opportunity, conversion rate). Combined special teams index weighted 45/55 PP/PK.
+
+**Rest and schedule**: Back-to-back detection (~4.5% win probability penalty), travel distance penalty, schedule density, rest days bonus. Net rest edge factor feeds into prediction.
+
+**Score-state adjusted stats**: Corsi adjusted for game state using McCurdy method. Leading CF x1.10/CA x0.90, trailing CF x0.90/CA x1.10, tied unadjusted.
+
+**Season review**: Record, points pace, Pythagorean wins (luck factor), analytics grades (Corsi + xG), special teams grade, goaltending grade.
+
+**Playoff probability**: Monte Carlo simulation (10K runs) from current points pace. Division and wildcard cutlines, points needed, win rate required.
+
+**Salary cap analysis**: Total cap hit, effective space (LTIR relief), position spending breakdown, top-5 earner concentration, expiring contracts, dead cap, cap health rating.
+
+**NHL prediction model**: 6 models combined via inverse-variance weighting:
+1. Points percentage log5 + home ice
+2. Pythagorean expectation (goal differential)
+3. Corsi-driven (possession proxy)
+4. xG-driven (shot quality)
+5. Goaltender matchup
+6. Combined with special teams + rest adjustments
 
 ## Architecture
 
@@ -90,43 +166,22 @@ Agent (Claude / GPT / LangGraph / custom)
                                         |
                               +---------v---------+
                               |   Tool Dispatch    |
-                              |   (13 tools)       |
+                              |   (21 tools)       |
                               +--------+-----------+
                                        |
                     +------------------+------------------+
                     v                  v                  v
-              +----------+     +------------+     +----------+
-              |  Engine   |     |  Storage   |     | Connectors|
-              |          |     |  (DuckDB)  |     | (live data)|
-              | Ensemble  |     |  games     |     | MLB API   |
-              | Features  |     |  odds      |     | NHL API   |
-              | Kelly     |     |  stats     |     | Odds API  |
-              | Value     |     |  cache     |     | Weather   |
-              | Graph     |     |  sessions  |     |           |
-              +----------+     +------------+     +----------+
+              +----------+     +------------+     +-----------+
+              |  Engine   |     |  Storage   |     | Connectors |
+              |          |     |  (DuckDB)  |     | (live data) |
+              | Ensemble  |     |  games     |     | NHL API    |
+              | Features  |     |  odds      |     | MLB API    |
+              | Hockey    |     |  stats     |     | Odds API   |
+              | Kelly     |     |  goalies   |     | Weather    |
+              | Value     |     |  advanced  |     |            |
+              | Graph     |     |  cap/roster|     |            |
+              +----------+     +------------+     +-----------+
 ```
-
-## Engine math
-
-**Ensemble predictions**: 4 models combined via inverse-variance weighting. Model 1 uses log5 (the baseball standard for head-to-head probability). Model 2 uses Pythagorean expectation. Model 3 uses recent form weighting. Model 4 adds weather adjustment. Confidence intervals via t-distribution.
-
-**Kelly Criterion**: Half-Kelly by default with 5% bankroll cap. Full Kelly formula: `f* = (bp - q) / b`. Won't bet below 2% edge or 3% EV threshold.
-
-**Graph analysis**: scipy shortest_path for closeness centrality, Brandes' algorithm for betweenness, scipy.linalg.eigh for eigenvector centrality. Matrix method (`A^3` diagonal) for clustering coefficient.
-
-**Expected value**: `EV = P(win) * (odds - 1) - P(loss)`. Scans all sportsbooks against model probability to find positive EV with minimum edge threshold.
-
-## Data layer
-
-DuckDB embedded columnar database. Fast analytical queries over millions of rows without a server process. Parquet-native for cheap historical archival.
-
-Auto-seeds with realistic sample data on first boot (deterministic random seed, reproducible). In production, live connectors refresh from:
-- MLB Stats API (free, no auth, real-time games + standings)
-- NHL Stats API (free, no auth)
-- The Odds API (API key, 500 req/mo free tier)
-- OpenWeather (API key, 1000 calls/day free)
-
-Every query response includes freshness metadata so agents know how stale the data is.
 
 ## Local development
 
@@ -134,7 +189,7 @@ Every query response includes freshness metadata so agents know how stale the da
 git clone https://github.com/paxtonedgar/ABBA.git
 cd ABBA/Projects/ABBA
 pip install -e ".[dev]"
-pytest  # 77 tests
+pytest  # 131 tests
 ```
 
 ```bash
@@ -145,7 +200,8 @@ python -m abba.server.http
 python -c "
 from abba import ABBAToolkit
 tk = ABBAToolkit()
-print(tk.find_value(sport='MLB'))
+tk.refresh_data(source='nhl', team='NYR')
+print(tk.season_review(team_id='NYR'))
 "
 ```
 
@@ -155,24 +211,26 @@ print(tk.find_value(sport='MLB'))
 Projects/ABBA/
   src/abba/
     server/           # tool interfaces
-      toolkit.py      # ABBAToolkit (main entry point, 13 tools)
+      toolkit.py      # ABBAToolkit (main entry point, 21 tools)
       mcp.py          # MCP stdio server
       http.py         # HTTP REST server
     engine/           # analytics compute
       ensemble.py     # inverse-variance weighted model combining
       features.py     # feature engineering (log5, pythagorean, weather)
+      hockey.py       # NHL analytics (Corsi, xG, goaltender, cap, playoffs)
       kelly.py        # Kelly Criterion position sizing
       value.py        # expected value scanning
       graph.py        # team network analysis (scipy)
     storage/
-      duckdb.py       # embedded columnar store
+      duckdb.py       # embedded columnar store (12 tables)
     connectors/
-      seed.py         # deterministic sample data
-      live.py         # live data source adapters
+      seed.py         # deterministic sample data (dev/test)
+      live.py         # live API connectors (NHL, MLB, Odds)
   tests/
     test_engine.py    # math correctness (33 tests)
+    test_hockey.py    # NHL analytics math (50 tests)
     test_storage.py   # DuckDB operations (11 tests)
-    test_toolkit.py   # integration + agent workflow (23 tests)
+    test_toolkit.py   # integration + agent workflow (27 tests)
     test_mcp.py       # protocol + SDK (10 tests)
   pyproject.toml
 ```

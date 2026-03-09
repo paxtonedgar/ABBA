@@ -25,7 +25,7 @@ class TestMCPProtocol:
         req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
         resp = handle_mcp_request(toolkit, req)
         tools = resp["result"]["tools"]
-        assert len(tools) >= 12
+        assert len(tools) >= 20
         # Every tool should have MCP-compliant schema
         for tool in tools:
             assert "name" in tool
@@ -105,6 +105,9 @@ class TestDirectSDK:
             "compare_odds": {"game_id": "nonexistent"},
             "calculate_ev": {"win_probability": 0.5, "decimal_odds": 2.0},
             "kelly_sizing": {"win_probability": 0.5, "decimal_odds": 2.0},
+            "nhl_predict_game": {"game_id": "nonexistent"},
+            "season_review": {"team_id": "nonexistent"},
+            "playoff_odds": {"team_id": "nonexistent"},
         }
         for name in tool_names:
             result = tk.call_tool(name, **safe_args.get(name, {}))

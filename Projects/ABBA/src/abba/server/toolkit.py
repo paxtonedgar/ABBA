@@ -25,6 +25,7 @@ from ..connectors.seed import seed_sample_data
 from ..engine.ensemble import EnsembleEngine
 from ..engine.features import FeatureEngine
 from ..engine.graph import GraphEngine
+from ..engine.hockey import HockeyAnalytics
 from ..engine.kelly import KellyEngine
 from ..engine.value import ValueEngine
 from ..storage import Storage
@@ -50,6 +51,7 @@ class ABBAToolkit:
         self.kelly = KellyEngine()
         self.value = ValueEngine()
         self.graph = GraphEngine()
+        self.hockey = HockeyAnalytics()
 
         # Create default session
         self._session_id = "default"
@@ -260,6 +262,227 @@ class ABBAToolkit:
                            result, start)
 
     # =====================================================================
+    # NHL-SPECIFIC TOOLS
+    # =====================================================================
+
+    def nhl_predict_game(
+        self,
+        game_id: str,
+        method: str = "weighted",
+    ) -> dict[str, Any]:
+        """NHL-specific prediction using Corsi, xG, goaltender, special teams, and rest features."""
+        start = time.time()
+
+        games = self.storage.query_games()
+        game = next((g for g in games if g.get("game_id") == game_id), None)
+        if not game:
+            return self._track("nhl_predict_game", {"game_id": game_id},
+                               {"error": f"game not found: {game_id}"}, start)
+
+        if game.get("sport") != "NHL":
+            return self._track("nhl_predict_game", {"game_id": game_id},
+                               {"error": "not an NHL game, use predict_game for other sports"}, start)
+
+        home = game.get("home_team", "")
+        away = game.get("away_team", "")
+
+        # Get all data sources
+        home_stats_list = self.storage.query_team_stats(team_id=home, sport="NHL")
+        away_stats_list = self.storage.query_team_stats(team_id=away, sport="NHL")
+        home_stats = home_stats_list[0] if home_stats_list else {"stats": {}}
+        away_stats = away_stats_list[0] if away_stats_list else {"stats": {}}
+
+        home_adv_list = self.storage.query_nhl_advanced_stats(team_id=home)
+        away_adv_list = self.storage.query_nhl_advanced_stats(team_id=away)
+        home_adv = home_adv_list[0].get("stats", {}) if home_adv_list else None
+        away_adv = away_adv_list[0].get("stats", {}) if away_adv_list else None
+
+        # Get starter goaltenders
+        home_goalies = self.storage.query_goaltender_stats(team=home)
+        away_goalies = self.storage.query_goaltender_stats(team=away)
+        home_goalie = next(
+            (g["stats"] for g in home_goalies if g.get("stats", {}).get("role") == "starter"),
+            home_goalies[0]["stats"] if home_goalies else None,
+        )
+        away_goalie = next(
+            (g["stats"] for g in away_goalies if g.get("stats", {}).get("role") == "starter"),
+            away_goalies[0]["stats"] if away_goalies else None,
+        )
+
+        # Build comprehensive NHL features
+        features = self.hockey.build_nhl_features(
+            home_stats, away_stats,
+            home_advanced=home_adv, away_advanced=away_adv,
+            home_goalie=home_goalie, away_goalie=away_goalie,
+        )
+
+        # Generate 6 NHL-specific model predictions
+        model_preds = self.hockey.predict_nhl_game(features)
+
+        # Check cache
+        data_hash = self.ensemble.data_hash(game_id, self.VERSION, features)
+        cached = self.storage.get_cached_prediction(game_id, self.VERSION + "-nhl", data_hash)
+        if cached:
+            cached["_cache_hit"] = True
+            return self._track("nhl_predict_game", {"game_id": game_id}, cached, start)
+
+        # Combine
+        prediction = self.ensemble.combine(model_preds, method=method)
+
+        result = {
+            "game_id": game_id,
+            "home_team": home,
+            "away_team": away,
+            "sport": "NHL",
+            "prediction": prediction.to_dict(),
+            "features": {k: round(v, 4) for k, v in features.items()},
+            "home_goaltender": home_goalie.get("name") if home_goalie else "unknown",
+            "away_goaltender": away_goalie.get("name") if away_goalie else "unknown",
+            "model_count": 6,
+            "model_types": [
+                "points_log5", "pythagorean", "corsi_driven",
+                "xg_driven", "goaltender_matchup", "combined_adjusted",
+            ],
+            "_cache_hit": False,
+        }
+
+        self.storage.cache_prediction(game_id, self.VERSION + "-nhl", data_hash, result)
+        return self._track("nhl_predict_game", {"game_id": game_id}, result, start)
+
+    def query_goaltender_stats(
+        self,
+        team: str | None = None,
+        goaltender_id: str | None = None,
+        season: str | None = None,
+    ) -> dict[str, Any]:
+        """Query NHL goaltender stats (Sv%, GAA, GSAA, xGSAA, quality starts)."""
+        start = time.time()
+        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
+        goalies = self.storage.query_goaltender_stats(
+            goaltender_id=goaltender_id, team=team, season=season,
+        )
+        result = {"goaltenders": goalies, "count": len(goalies)}
+        return self._track("query_goaltender_stats", params, result, start)
+
+    def query_advanced_stats(
+        self,
+        team_id: str | None = None,
+        season: str | None = None,
+    ) -> dict[str, Any]:
+        """Query NHL advanced stats (Corsi, Fenwick, xG, PDO, score-adjusted)."""
+        start = time.time()
+        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
+        stats = self.storage.query_nhl_advanced_stats(team_id=team_id, season=season)
+        result = {"teams": stats, "count": len(stats)}
+        return self._track("query_advanced_stats", params, result, start)
+
+    def query_cap_data(
+        self,
+        team: str | None = None,
+        season: str | None = None,
+        position: str | None = None,
+    ) -> dict[str, Any]:
+        """Query salary cap data with cap analysis."""
+        start = time.time()
+        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
+        contracts = self.storage.query_salary_cap(team=team, season=season, position=position)
+
+        # Run cap analysis if querying a specific team
+        analysis = None
+        if team and contracts:
+            roster_for_analysis = [
+                {"name": c["name"], "position": c.get("position", ""),
+                 "cap_hit": c.get("cap_hit", 0),
+                 "contract_years_remaining": c.get("contract_years_remaining", 1),
+                 "status": c.get("status", "active")}
+                for c in contracts
+            ]
+            analysis = self.hockey.cap_analysis(roster_for_analysis)
+
+        result = {"contracts": contracts, "count": len(contracts)}
+        if analysis:
+            result["cap_analysis"] = analysis
+        return self._track("query_cap_data", params, result, start)
+
+    def query_roster(
+        self,
+        team: str | None = None,
+        season: str | None = None,
+        position: str | None = None,
+    ) -> dict[str, Any]:
+        """Query team roster with line combinations and injury status."""
+        start = time.time()
+        params = {k: v for k, v in locals().items() if k != "self" and v is not None}
+        players = self.storage.query_roster(team=team, season=season, position=position)
+        result = {"players": players, "count": len(players)}
+        return self._track("query_roster", params, result, start)
+
+    def season_review(
+        self,
+        team_id: str,
+        season: str | None = None,
+    ) -> dict[str, Any]:
+        """Comprehensive NHL season review combining record, analytics, goaltending, and special teams."""
+        start = time.time()
+        season = season or "2025-26"
+
+        team_stats_list = self.storage.query_team_stats(team_id=team_id, sport="NHL", season=season)
+        if not team_stats_list:
+            return self._track("season_review", {"team_id": team_id},
+                               {"error": f"no stats found for {team_id}"}, start)
+
+        team_stats = team_stats_list[0].get("stats", {})
+
+        # Advanced stats
+        adv_list = self.storage.query_nhl_advanced_stats(team_id=team_id, season=season)
+        advanced = adv_list[0].get("stats", {}) if adv_list else None
+
+        # Goaltenders
+        goalies = self.storage.query_goaltender_stats(team=team_id, season=season)
+        goalie_stats = [g.get("stats", {}) for g in goalies] if goalies else None
+
+        review = self.hockey.season_review(team_stats, advanced, goalie_stats)
+        review["team_id"] = team_id
+        review["season"] = season
+
+        return self._track("season_review", {"team_id": team_id, "season": season}, review, start)
+
+    def playoff_odds(
+        self,
+        team_id: str,
+        season: str | None = None,
+        division_cutline: int = 90,
+        wildcard_cutline: int = 95,
+    ) -> dict[str, Any]:
+        """Estimate playoff probability from current points pace."""
+        start = time.time()
+        season = season or "2025-26"
+
+        team_stats_list = self.storage.query_team_stats(team_id=team_id, sport="NHL", season=season)
+        if not team_stats_list:
+            return self._track("playoff_odds", {"team_id": team_id},
+                               {"error": f"no stats found for {team_id}"}, start)
+
+        stats = team_stats_list[0].get("stats", {})
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        otl = stats.get("overtime_losses", 0)
+        gp = wins + losses + otl
+        points = wins * 2 + otl
+        remaining = 82 - gp
+
+        result = self.hockey.playoff_probability(
+            current_points=points,
+            games_remaining=remaining,
+            games_played=gp,
+            division_cutline=division_cutline,
+            wildcard_cutline=wildcard_cutline,
+        )
+        result["team_id"] = team_id
+        result["season"] = season
+        return self._track("playoff_odds", {"team_id": team_id}, result, start)
+
+    # =====================================================================
     # MARKET TOOLS
     # =====================================================================
 
@@ -350,6 +573,36 @@ class ABBAToolkit:
     # =====================================================================
     # SESSION / META TOOLS
     # =====================================================================
+
+    def refresh_data(
+        self,
+        source: str = "all",
+        team: str | None = None,
+    ) -> dict[str, Any]:
+        """Refresh data from live sources. NHL API is free, Odds API needs a key."""
+        start = time.time()
+        from ..connectors.live import NHLLiveConnector, OddsLiveConnector
+
+        results: dict[str, Any] = {}
+
+        if source in ("nhl", "all"):
+            nhl = NHLLiveConnector()
+            try:
+                nhl_result = nhl.refresh(self.storage, team=team)
+                results["nhl"] = nhl_result
+            except Exception as e:
+                results["nhl"] = {"error": str(e)}
+
+        if source in ("odds", "all"):
+            odds = OddsLiveConnector()
+            try:
+                odds_result = odds.refresh(self.storage)
+                results["odds"] = odds_result
+            except Exception as e:
+                results["odds"] = {"error": str(e)}
+
+        result = {"refreshed_sources": list(results.keys()), "details": results}
+        return self._track("refresh_data", {"source": source, "team": team}, result, start)
 
     def session_budget(self) -> dict[str, Any]:
         """Check remaining session budget and usage."""
@@ -479,6 +732,84 @@ class ABBAToolkit:
                 "description": "Check remaining session budget and call count",
                 "params": {},
             },
+            # --- NHL-specific tools ---
+            {
+                "name": "nhl_predict_game",
+                "category": "analytics",
+                "description": "NHL-specific prediction using Corsi, xG, goaltender matchup, special teams, and rest",
+                "params": {
+                    "game_id": {"type": "string", "required": True},
+                    "method": {"type": "string", "optional": True, "default": "weighted"},
+                },
+            },
+            {
+                "name": "query_goaltender_stats",
+                "category": "data",
+                "description": "Query NHL goaltender stats (Sv%, GAA, GSAA, xGSAA, quality starts)",
+                "params": {
+                    "team": {"type": "string", "optional": True},
+                    "goaltender_id": {"type": "string", "optional": True},
+                    "season": {"type": "string", "optional": True},
+                },
+            },
+            {
+                "name": "query_advanced_stats",
+                "category": "data",
+                "description": "Query NHL advanced stats (Corsi, Fenwick, xG, PDO, score-adjusted)",
+                "params": {
+                    "team_id": {"type": "string", "optional": True},
+                    "season": {"type": "string", "optional": True},
+                },
+            },
+            {
+                "name": "query_cap_data",
+                "category": "data",
+                "description": "Query salary cap data with cap analysis (space, dead cap, top earners)",
+                "params": {
+                    "team": {"type": "string", "optional": True},
+                    "season": {"type": "string", "optional": True},
+                    "position": {"type": "string", "optional": True},
+                },
+            },
+            {
+                "name": "query_roster",
+                "category": "data",
+                "description": "Query team roster with line combinations, player stats, and injury status",
+                "params": {
+                    "team": {"type": "string", "optional": True},
+                    "season": {"type": "string", "optional": True},
+                    "position": {"type": "string", "optional": True},
+                },
+            },
+            {
+                "name": "season_review",
+                "category": "analytics",
+                "description": "Comprehensive NHL season review (record, analytics grades, goaltending, special teams)",
+                "params": {
+                    "team_id": {"type": "string", "required": True},
+                    "season": {"type": "string", "optional": True},
+                },
+            },
+            {
+                "name": "playoff_odds",
+                "category": "analytics",
+                "description": "Estimate playoff probability from current points pace (Monte Carlo simulation)",
+                "params": {
+                    "team_id": {"type": "string", "required": True},
+                    "season": {"type": "string", "optional": True},
+                    "division_cutline": {"type": "integer", "optional": True, "default": 90},
+                    "wildcard_cutline": {"type": "integer", "optional": True, "default": 95},
+                },
+            },
+            {
+                "name": "refresh_data",
+                "category": "data",
+                "description": "Refresh data from live sources (NHL API, Odds API). Requires API keys for some sources.",
+                "params": {
+                    "source": {"type": "string", "optional": True, "enum": ["nhl", "odds", "all"]},
+                    "team": {"type": "string", "optional": True},
+                },
+            },
         ]
 
     def call_tool(self, tool_name: str, **kwargs: Any) -> dict[str, Any]:
@@ -501,6 +832,15 @@ class ABBAToolkit:
             "calculate_ev": self.calculate_ev,
             "kelly_sizing": self.kelly_sizing,
             "session_budget": self.session_budget,
+            # NHL-specific
+            "nhl_predict_game": self.nhl_predict_game,
+            "query_goaltender_stats": self.query_goaltender_stats,
+            "query_advanced_stats": self.query_advanced_stats,
+            "query_cap_data": self.query_cap_data,
+            "query_roster": self.query_roster,
+            "season_review": self.season_review,
+            "playoff_odds": self.playoff_odds,
+            "refresh_data": self.refresh_data,
         }
 
         fn = tool_map.get(tool_name)
