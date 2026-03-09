@@ -1,70 +1,90 @@
-# Getting Started with Create React App
+# ABBA - Advanced Baseball Betting Analytics
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A comprehensive sports betting analytics platform focused on MLB and NHL, featuring advanced machine learning, biometric integration, and real-time data processing.
 
-## Available Scripts
+## Features
 
-In the project directory, you can run:
+- **Ensemble ML Models**: Random forest and gradient boosting ensembles with biometric feature integration
+- **Real-time Odds Analysis**: Live sports data processing and arbitrage detection
+- **Personalization Engine**: User-specific model training and pattern analysis
+- **Graph Analysis**: Team performance modeling using network theory
+- **Browser Automation**: Automated data collection and betting execution via BrowserBase
+- **Fund Management**: Bankroll management with configurable risk tolerance
 
-### `npm start`
+## Tech Stack
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- **Backend**: Python (analytics, ML, agents), Go (services)
+- **ML**: Scikit-learn ensembles, biometric feature engineering, personalization models
+- **Data**: SQLite, Redis, NumPy/Pandas
+- **Automation**: BrowserBase, BrightData
+- **Quality**: Black, Ruff, MyPy, pytest
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Project Structure
 
-### `npm test`
+```
+Projects/ABBA/
+├── src/abba/                 # Main package
+│   ├── core/                 # Config, logging
+│   ├── analytics/            # ML models, biometrics, ensemble, graph analysis
+│   ├── trading/              # Trading algorithms
+│   ├── agents/               # AI agents
+│   ├── data/                 # Data pipeline
+│   └── api/                  # API endpoints
+├── tests/                    # Unit + integration tests
+├── docs/                     # Strategy docs, system design
+└── examples/                 # Usage examples
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Quick Start
 
-### `npm run build`
+```bash
+git clone https://github.com/paxtonedgar/ABBA.git
+cd ABBA/Projects/ABBA
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+pip install -e .
+pip install -e ".[dev]"
+```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+Create a `.env` file:
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+```env
+OPENAI_API_KEY=your_key
+BROWSERBASE_API_KEY=your_key
+DATABASE_URL=sqlite:///abba.db
+REDIS_URL=redis://localhost:6379
+SUPPORTED_SPORTS=MLB,NHL
+```
 
-### `npm run eject`
+## Usage
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+```python
+from abba import AdvancedAnalyticsManager
+from abba.core import Config
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+config = Config()
+analytics = AdvancedAnalyticsManager(config, db_manager)
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+# Ensemble prediction
+ensemble = await analytics.create_ensemble_model(['random_forest', 'gradient_boosting'])
+prediction = await analytics.ensemble_predictions(ensemble, features)
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+# Biometric integration
+features = await analytics.integrate_biometrics(biometric_data)
+```
 
-## Learn More
+## Testing
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+```bash
+pytest
+pytest --cov=src/abba --cov-report=html
+pytest -m unit
+pytest -m integration
+```
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Documentation
 
-### Code Splitting
+See the [docs/](Projects/ABBA/docs/) directory for detailed documentation on MLB/NHL strategies, data pipeline architecture, fund management, and system design.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+## License
 
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+MIT
