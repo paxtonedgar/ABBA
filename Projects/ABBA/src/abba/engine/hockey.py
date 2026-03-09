@@ -694,9 +694,24 @@ class HockeyAnalytics:
         features["home_goal_diff_pg"] = (h_gf - h_ga) / h_gp
         features["away_goal_diff_pg"] = (a_gf - a_ga) / a_gp
 
-        # Recent form
+        # Recent form (L10)
         features["home_recent_form"] = hs.get("recent_form", features["home_pts_pct"])
         features["away_recent_form"] = as_.get("recent_form", features["away_pts_pct"])
+
+        # Home/road splits (if available from API)
+        h_home_wins = hs.get("home_wins", 0)
+        h_home_losses = hs.get("home_losses", 0)
+        h_home_otl = hs.get("home_ot_losses", 0)
+        h_home_gp = h_home_wins + h_home_losses + h_home_otl
+        if h_home_gp > 10:
+            features["home_pts_pct"] = (h_home_wins * 2 + h_home_otl) / (h_home_gp * 2)
+
+        a_road_wins = as_.get("road_wins", 0)
+        a_road_losses = as_.get("road_losses", 0)
+        a_road_otl = as_.get("road_ot_losses", 0)
+        a_road_gp = a_road_wins + a_road_losses + a_road_otl
+        if a_road_gp > 10:
+            features["away_pts_pct"] = (a_road_wins * 2 + a_road_otl) / (a_road_gp * 2)
 
         # Home ice advantage (NHL average ~0.55)
         features["home_ice_advantage"] = 0.55
@@ -744,13 +759,17 @@ class HockeyAnalytics:
     def predict_nhl_game(self, features: dict[str, float]) -> list[float]:
         """Generate NHL-specific model predictions from features.
 
-        6 models:
-        1. Points percentage + home ice (baseline)
+        6 models with calibrated sensitivity:
+        1. Points percentage log5 + home ice (baseline)
         2. Pythagorean expectation (goal-based)
-        3. Corsi-driven model (possession)
-        4. xG-driven model (shot quality)
+        3. Recent form weighted (momentum)
+        4. Goal differential strength model
         5. Goaltender matchup model
-        6. Combined with rest/special teams adjustments
+        6. Combined with special teams + rest adjustments
+
+        Calibration note: NHL game outcomes have ~58-62% max predictability
+        (compared to ~70% in NBA). Models should produce a realistic spread
+        of 0.35-0.65, not cluster at 0.50.
         """
         hp = features.get("home_pts_pct", 0.5)
         ap = features.get("away_pts_pct", 0.5)
@@ -767,35 +786,45 @@ class HockeyAnalytics:
         ste = features.get("home_st_edge", 0.0)
         re = features.get("rest_edge", 0.0)
 
-        # Model 1: Points percentage log5 + home ice
+        # Home ice baseline: ~3.5% edge, applied to all models
+        home_boost = 0.035
+
+        # Model 1: Points percentage log5 (the standard head-to-head formula)
+        # log5: P(A beats B) = (pA - pA*pB) / (pA + pB - 2*pA*pB)
         denom = hp + ap - 2 * hp * ap
         m1 = (hp - hp * ap) / denom if abs(denom) > 1e-8 else 0.5
-        m1 = 0.65 * m1 + 0.35 * ha
+        m1 += home_boost
 
-        # Model 2: Pythagorean (goal differential, exponent 2.0)
+        # Model 2: Pythagorean expectation (goal-based)
+        # Convert per-game differentials to season-level strength
+        # Teams range from -1.0 to +1.0 GD/game; shift to positive for exponentiation
         h_strength = max(hgd + 3.5, 0.01) ** 2.0
         a_strength = max(agd + 3.5, 0.01) ** 2.0
         total = h_strength + a_strength
-        m2 = h_strength / total if total > 0 else 0.5
+        m2 = (h_strength / total if total > 0 else 0.5) + home_boost
 
-        # Model 3: Corsi-driven
-        # Corsi% difference -> probability adjustment
-        corsi_diff = hcf - (1.0 - acf)  # how much better home's possession is
-        m3 = 0.5 + corsi_diff * 0.8  # scale: 5% CF% diff -> ~4% probability
-        m3 = 0.7 * m3 + 0.3 * ha
+        # Model 3: Recent form (hot/cold streaks matter in hockey)
+        # Direct comparison of recent win rates with home boost
+        form_diff = hrf - arf
+        m3 = 0.5 + form_diff * 0.6 + home_boost
 
-        # Model 4: xG-driven
-        xg_diff = hxg - (1.0 - axg)
-        m4 = 0.5 + xg_diff * 1.0  # xG is more predictive than Corsi
-        m4 = 0.7 * m4 + 0.3 * ha
+        # Model 4: Goal differential strength
+        # Signed goal differential is one of the most predictive features
+        gd_diff = hgd - agd  # positive = home has better GD
+        # Scale: +0.5 GD/game diff -> ~0.10 probability edge
+        m4 = 0.5 + gd_diff * 0.20 + home_boost
 
         # Model 5: Goaltender matchup
-        m5 = 0.5 + ge * 0.15  # goalie edge scales probability
-        m5 = 0.6 * m5 + 0.4 * ha
+        # Goalie edge from matchup_edge() ranges -1 to 1
+        # Scale: full goalie edge worth ~0.08 probability
+        m5 = 0.5 + ge * 0.08 + home_boost
 
-        # Model 6: Combined with adjustments
+        # Model 6: Composite with special teams + rest
         base = (m1 + m2 + m3 + m4 + m5) / 5
-        m6 = base + ste * 0.3 + re  # special teams and rest adjustments
+        # Special teams: typical range is -0.10 to +0.10, worth ~3% probability per 0.10
+        st_adj = ste * 0.3
+        # Rest: B2B penalty = ~0.045, directly additive
+        m6 = base + st_adj + re
 
         return [float(np.clip(x, 0.01, 0.99)) for x in [m1, m2, m3, m4, m5, m6]]
 

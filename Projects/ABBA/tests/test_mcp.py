@@ -108,6 +108,7 @@ class TestDirectSDK:
             "nhl_predict_game": {"game_id": "nonexistent"},
             "season_review": {"team_id": "nonexistent"},
             "playoff_odds": {"team_id": "nonexistent"},
+            "run_workflow": {"workflow": "tonights_slate"},
         }
         for name in tool_names:
             result = tk.call_tool(name, **safe_args.get(name, {}))

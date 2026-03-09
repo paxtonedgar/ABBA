@@ -604,6 +604,21 @@ class ABBAToolkit:
         result = {"refreshed_sources": list(results.keys()), "details": results}
         return self._track("refresh_data", {"source": source, "team": team}, result, start)
 
+    def run_workflow(self, workflow: str, **kwargs: Any) -> dict[str, Any]:
+        """Run a multi-step analytical workflow by name."""
+        start = time.time()
+        from ..workflows.engine import WorkflowEngine
+        engine = WorkflowEngine(self)
+        result = engine.run(workflow, **kwargs)
+        return self._track("run_workflow", {"workflow": workflow, **kwargs}, result, start)
+
+    def list_workflows(self) -> dict[str, Any]:
+        """List available multi-step workflows for agent discovery."""
+        start = time.time()
+        from ..workflows.engine import list_workflows
+        result = {"workflows": list_workflows()}
+        return self._track("list_workflows", {}, result, start)
+
     def session_budget(self) -> dict[str, Any]:
         """Check remaining session budget and usage."""
         start = time.time()
@@ -810,6 +825,23 @@ class ABBAToolkit:
                     "team": {"type": "string", "optional": True},
                 },
             },
+            {
+                "name": "run_workflow",
+                "category": "workflow",
+                "description": "Run a multi-step analytical workflow (game_prediction, season_story, value_scan, betting_strategy, etc.)",
+                "params": {
+                    "workflow": {"type": "string", "required": True,
+                                 "enum": ["game_prediction", "tonights_slate", "season_story", "value_scan",
+                                          "cap_strategy", "playoff_race", "goaltender_duel", "team_comparison",
+                                          "betting_strategy"]},
+                },
+            },
+            {
+                "name": "list_workflows",
+                "category": "workflow",
+                "description": "List available multi-step workflows with trigger phrases and parameters",
+                "params": {},
+            },
         ]
 
     def call_tool(self, tool_name: str, **kwargs: Any) -> dict[str, Any]:
@@ -841,6 +873,8 @@ class ABBAToolkit:
             "season_review": self.season_review,
             "playoff_odds": self.playoff_odds,
             "refresh_data": self.refresh_data,
+            "run_workflow": self.run_workflow,
+            "list_workflows": self.list_workflows,
         }
 
         fn = tool_map.get(tool_name)
