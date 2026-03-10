@@ -452,7 +452,7 @@ class Storage:
 
     def create_session(self, session_id: str, budget: float = 1000.0) -> dict[str, Any]:
         self.conn.execute("""
-            INSERT INTO sessions (session_id, budget_remaining, budget_total)
+            INSERT OR REPLACE INTO sessions (session_id, budget_remaining, budget_total)
             VALUES (?, ?, ?)
         """, [session_id, budget, budget])
         return {"session_id": session_id, "budget_remaining": budget}
