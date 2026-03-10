@@ -1,0 +1,11 @@
+{
+  "name": "abba-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Python ABBA backend — change this to your deployed URL
+  "vars": {
+    "ABBA_BACKEND_URL": "http://localhost:8420"
+  }
+}
