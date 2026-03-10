@@ -1,0 +1,2 @@
+[console_scripts]
+abba-server = abba.server.http:run_http_server
