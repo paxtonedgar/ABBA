@@ -1,204 +1,277 @@
-"""MCP (Model Context Protocol) server for ABBA.
+"""MCP server for ABBA — uses the official MCP Python SDK.
 
-This is the entry point that makes ABBA a subscribable tool service.
-When an agent (Claude, GPT, or custom) connects via MCP, it discovers
-all ABBA tools automatically and can call them with structured I/O.
+This makes ABBA available as a tool server in Claude Desktop,
+Claude Code, and any MCP-compatible client.
 
-The server solves the stale data problem:
-- LLMs hallucinate sports records, rosters, and outcomes
-- ABBA provides live, queryable data the agent can trust
-- Every response includes freshness metadata so the agent knows
-  exactly how old the data is
-
-Run as MCP server:
+Run as MCP server (stdio transport — what Claude Desktop uses):
     python -m abba.server.mcp
 
-Or register in Claude Desktop / claude_desktop_config.json:
+Register in Claude Desktop (claude_desktop_config.json):
     {
       "mcpServers": {
         "abba": {
-          "command": "python",
+          "command": "/path/to/abba-nhl/.venv/bin/python",
           "args": ["-m", "abba.server.mcp"],
           "env": {"ABBA_DB_PATH": "abba.duckdb"}
         }
       }
     }
-
-For pip/artifact install:
-    pip install abba
-    # Then register as MCP server, or import directly:
-    from abba import ABBAToolkit
-    toolkit = ABBAToolkit()
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 from typing import Any
+
+from mcp.server.fastmcp import FastMCP
 
 from ..server.toolkit import ABBAToolkit
 
+# Initialize toolkit at module level so it's ready when tools are called
+_db_path = os.environ.get("ABBA_DB_PATH", ":memory:")
+_toolkit = ABBAToolkit(db_path=_db_path, auto_seed=True)
 
-def create_mcp_server() -> dict[str, Any]:
-    """Create the MCP server configuration.
-
-    Returns the server info that MCP clients use for capability discovery.
-    """
-    return {
-        "name": "abba",
-        "version": ABBAToolkit.VERSION,
-        "description": (
-            "Sports analytics toolkit -- live game data, ensemble ML predictions, "
-            "odds comparison, expected value scanning, and Kelly Criterion sizing. "
-            "Solves the stale data problem: agents get real-time sports data "
-            "instead of hallucinating records and rosters."
-        ),
-        "capabilities": {
-            "tools": True,
-            "resources": True,
-        },
-    }
+mcp = FastMCP(
+    "ABBA Sports Analytics",
+    instructions=(
+        "ABBA provides live NHL data, ensemble ML predictions, odds comparison, "
+        "expected value scanning, and Kelly Criterion sizing. Every response includes "
+        "confidence metadata — always mention the reliability grade and caveats to the user. "
+        "Call refresh_data first to pull live NHL standings and schedule."
+    ),
+)
 
 
-def tools_to_mcp_schema(toolkit: ABBAToolkit) -> list[dict[str, Any]]:
-    """Convert ABBAToolkit tools to MCP tool schema format."""
-    mcp_tools = []
-    for tool in toolkit.list_tools():
-        properties = {}
-        required = []
-        for param_name, param_info in tool["params"].items():
-            prop: dict[str, Any] = {}
-            ptype = param_info.get("type", "string")
-            type_map = {
-                "string": "string",
-                "integer": "integer",
-                "number": "number",
-                "boolean": "boolean",
-                "object": "object",
-            }
-            prop["type"] = type_map.get(ptype, "string")
-            if "enum" in param_info:
-                prop["enum"] = param_info["enum"]
-            if "default" in param_info:
-                prop["default"] = param_info["default"]
-            if "format" in param_info:
-                prop["description"] = f"Format: {param_info['format']}"
-            properties[param_name] = prop
-            if param_info.get("required"):
-                required.append(param_name)
+# ---------------------------------------------------------------------------
+# Data tools
+# ---------------------------------------------------------------------------
 
-        mcp_tools.append({
-            "name": tool["name"],
-            "description": tool["description"],
-            "inputSchema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        })
-    return mcp_tools
+@mcp.tool()
+def query_games(
+    sport: str | None = None,
+    date: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    team: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> str:
+    """Query games with filters. Sport: NHL or MLB. Status: scheduled, final. Date format: YYYY-MM-DD."""
+    result = _toolkit.query_games(
+        sport=sport, date=date, date_from=date_from, date_to=date_to,
+        team=team, status=status, limit=limit,
+    )
+    return json.dumps(result, default=str)
 
 
-def handle_mcp_request(toolkit: ABBAToolkit, request: dict[str, Any]) -> dict[str, Any]:
-    """Handle a single MCP JSON-RPC request.
+@mcp.tool()
+def query_odds(
+    game_id: str | None = None,
+    sportsbook: str | None = None,
+    latest_only: bool = True,
+) -> str:
+    """Query odds snapshots across sportsbooks for a game."""
+    result = _toolkit.query_odds(game_id=game_id, sportsbook=sportsbook, latest_only=latest_only)
+    return json.dumps(result, default=str)
 
-    Supports:
-    - initialize: capability exchange
-    - tools/list: tool discovery
-    - tools/call: tool execution
-    - resources/list: data source listing
-    """
-    method = request.get("method", "")
-    params = request.get("params", {})
-    req_id = request.get("id")
 
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": create_mcp_server(),
-                "capabilities": {"tools": {}, "resources": {}},
-            },
-        }
+@mcp.tool()
+def query_team_stats(
+    team_id: str | None = None,
+    sport: str | None = None,
+    season: str | None = None,
+) -> str:
+    """Query team statistics — wins, losses, goal/run differentials."""
+    result = _toolkit.query_team_stats(team_id=team_id, sport=sport, season=season)
+    return json.dumps(result, default=str)
 
-    if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"tools": tools_to_mcp_schema(toolkit)},
-        }
 
-    if method == "tools/call":
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
-        result = toolkit.call_tool(tool_name, **arguments)
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "content": [{"type": "text", "text": json.dumps(result, default=str)}],
-            },
-        }
+@mcp.tool()
+def list_sources() -> str:
+    """List available data tables and row counts."""
+    result = _toolkit.list_sources()
+    return json.dumps(result, default=str)
 
-    if method == "resources/list":
-        sources = toolkit.list_sources()
-        resources = []
-        for src in sources.get("sources", []):
-            resources.append({
-                "uri": f"abba://data/{src['table']}",
-                "name": src["table"],
-                "description": f"Sports data table: {src['table']} ({src['row_count']} rows)",
-                "mimeType": "application/json",
-            })
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"resources": resources},
-        }
 
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {"code": -32601, "message": f"Method not found: {method}"},
-    }
+@mcp.tool()
+def describe_dataset(table: str) -> str:
+    """Get column names and types for a data table."""
+    result = _toolkit.describe_dataset(table=table)
+    return json.dumps(result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Analytics tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def predict_game(game_id: str, method: str = "weighted") -> str:
+    """Ensemble prediction for a game — returns home win probability with confidence interval."""
+    result = _toolkit.predict_game(game_id=game_id, method=method)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def explain_prediction(game_id: str) -> str:
+    """Feature importance breakdown for a prediction — what's driving the numbers."""
+    result = _toolkit.explain_prediction(game_id=game_id)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def nhl_predict_game(game_id: str, method: str = "weighted") -> str:
+    """NHL-specific 8-model prediction: Corsi, xG, goaltender matchup, Elo, player impact, special teams, and rest."""
+    result = _toolkit.nhl_predict_game(game_id=game_id, method=method)
+    return json.dumps(result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Market tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def find_value(
+    sport: str | None = None,
+    date: str | None = None,
+    min_ev: float = 0.03,
+) -> str:
+    """Scan for +EV betting opportunities across all scheduled games."""
+    result = _toolkit.find_value(sport=sport, date=date, min_ev=min_ev)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def compare_odds(game_id: str) -> str:
+    """Compare odds across sportsbooks for a game — find the best line."""
+    result = _toolkit.compare_odds(game_id=game_id)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def calculate_ev(win_probability: float, decimal_odds: float) -> str:
+    """Calculate expected value for a specific bet. Returns EV, edge, and implied probability."""
+    result = _toolkit.calculate_ev(win_probability=win_probability, decimal_odds=decimal_odds)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def kelly_sizing(
+    win_probability: float,
+    decimal_odds: float,
+    bankroll: float = 10000.0,
+) -> str:
+    """Calculate optimal bet size using Kelly Criterion. Returns full, half, and quarter Kelly."""
+    result = _toolkit.kelly_sizing(
+        win_probability=win_probability, decimal_odds=decimal_odds, bankroll=bankroll,
+    )
+    return json.dumps(result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# NHL-specific tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def query_goaltender_stats(
+    team: str | None = None,
+    goaltender_id: str | None = None,
+    season: str | None = None,
+) -> str:
+    """Query NHL goaltender stats — Sv%, GAA, GSAA, xGSAA, quality starts."""
+    result = _toolkit.query_goaltender_stats(team=team, goaltender_id=goaltender_id, season=season)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def query_advanced_stats(
+    team_id: str | None = None,
+    season: str | None = None,
+) -> str:
+    """Query NHL advanced stats — Corsi, Fenwick, xG, PDO, score-adjusted metrics."""
+    result = _toolkit.query_advanced_stats(team_id=team_id, season=season)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def query_cap_data(
+    team: str | None = None,
+    season: str | None = None,
+    position: str | None = None,
+) -> str:
+    """Query salary cap data with cap analysis — space, dead cap, top earners."""
+    result = _toolkit.query_cap_data(team=team, season=season, position=position)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def query_roster(
+    team: str | None = None,
+    season: str | None = None,
+    position: str | None = None,
+) -> str:
+    """Query team roster with player stats and injury status."""
+    result = _toolkit.query_roster(team=team, season=season, position=position)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def season_review(team_id: str, season: str | None = None) -> str:
+    """Comprehensive NHL season review — record, analytics grades, goaltending, special teams."""
+    result = _toolkit.season_review(team_id=team_id, season=season)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def playoff_odds(
+    team_id: str,
+    season: str | None = None,
+    division_cutline: int = 90,
+    wildcard_cutline: int = 95,
+) -> str:
+    """Estimate playoff probability from current points pace using Monte Carlo simulation."""
+    result = _toolkit.playoff_odds(
+        team_id=team_id, season=season,
+        division_cutline=division_cutline, wildcard_cutline=wildcard_cutline,
+    )
+    return json.dumps(result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Session tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def refresh_data(source: str = "all", team: str | None = None) -> str:
+    """Refresh data from live sources — NHL API (free, no key) and Odds API (needs ODDS_API_KEY). Call this first!"""
+    result = _toolkit.refresh_data(source=source, team=team)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def session_budget() -> str:
+    """Check remaining session budget and tool call count."""
+    result = _toolkit.session_budget()
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def run_workflow(workflow: str) -> str:
+    """Run a multi-step analytical workflow: game_prediction, tonights_slate, season_story, value_scan, betting_strategy, etc."""
+    result = _toolkit.run_workflow(workflow=workflow)
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def list_workflows() -> str:
+    """List available multi-step workflows with descriptions and trigger phrases."""
+    result = _toolkit.list_workflows()
+    return json.dumps(result, default=str)
 
 
 def run_stdio_server() -> None:
-    """Run MCP server over stdio (standard MCP transport).
-
-    Reads JSON-RPC requests from stdin, writes responses to stdout.
-    This is what Claude Desktop and other MCP clients expect.
-    """
-    db_path = os.environ.get("ABBA_DB_PATH", ":memory:")
-    toolkit = ABBAToolkit(db_path=db_path, auto_seed=True)
-
-    # Write to stderr so it doesn't pollute the JSON-RPC stream
-    sys.stderr.write(f"ABBA MCP server v{ABBAToolkit.VERSION} started\n")
-    sys.stderr.write(f"Database: {db_path}\n")
-    sys.stderr.flush()
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            request = json.loads(line)
-            response = handle_mcp_request(toolkit, request)
-            sys.stdout.write(json.dumps(response) + "\n")
-            sys.stdout.flush()
-        except json.JSONDecodeError:
-            error_response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": "Parse error"},
-            }
-            sys.stdout.write(json.dumps(error_response) + "\n")
-            sys.stdout.flush()
+    """Run the MCP server over stdio transport."""
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
