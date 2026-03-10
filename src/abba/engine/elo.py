@@ -1,10 +1,10 @@
 """NHL Elo rating system.
 
-Implements a FiveThirtyEight-style Elo model tuned for hockey:
-- K-factor of 6 (high-variance sport)
+Implements an Elo model tuned for hockey:
+- K-factor of 4 (FiveThirtyEight NHL standard)
 - Home ice advantage of +50 Elo points
 - Between-season reversion of 1/3 toward 1500
-- Optional margin-of-victory multiplier for additional signal
+- Margin-of-victory multiplier for additional signal
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ class EloRatings:
     ----------
     k : float
         K-factor controlling how much a single game moves ratings.
-        FiveThirtyEight uses 6 for the NHL.
+        FiveThirtyEight uses K=4 for NHL (lower than other sports due
+        to hockey's high variance).
     home_advantage : float
         Elo-point bonus added to the home team's rating when computing
         win probability. 50 is a reasonable NHL default.
@@ -31,7 +32,7 @@ class EloRatings:
 
     def __init__(
         self,
-        k: float = 6,
+        k: float = 4,
         home_advantage: float = 50,
         initial_rating: float = 1500,
     ) -> None:

@@ -106,7 +106,7 @@ class NHLToolsMixin:
             prediction_value=prediction.to_dict().get("value", 0.5),
             data_source=data_source,
             has_goalie_data=has_goalie,
-            last_refresh_ts=None,
+            last_refresh_ts=getattr(self, '_last_refresh_ts', None),
             extra_caveats=extra_caveats if extra_caveats else None,
         )
 

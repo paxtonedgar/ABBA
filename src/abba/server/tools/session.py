@@ -37,6 +37,12 @@ class SessionToolsMixin:
                 results["odds"] = {"error": str(e)}
 
         errors = {k: v["error"] for k, v in results.items() if isinstance(v, dict) and "error" in v}
+
+        # Track freshness — any successful refresh updates the timestamp
+        successes = {k for k, v in results.items() if isinstance(v, dict) and "error" not in v}
+        if successes:
+            self._last_refresh_ts = time.time()
+
         result = {
             "refreshed_sources": list(results.keys()),
             "details": results,

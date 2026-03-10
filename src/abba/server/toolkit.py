@@ -80,7 +80,8 @@ class ABBAToolkit(
         self.value = ValueEngine()
         self.graph = GraphEngine()
         self.hockey = HockeyAnalytics()
-        self.elo = EloRatings(k=6, home_advantage=50)
+        self.elo = EloRatings(k=4, home_advantage=50)
+        self._last_refresh_ts: float | None = None
 
         # Create default session
         self._session_id = "default"
