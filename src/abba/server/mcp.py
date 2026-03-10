@@ -37,8 +37,18 @@ mcp = FastMCP(
     instructions=(
         "ABBA provides live NHL data, ensemble ML predictions, odds comparison, "
         "expected value scanning, and Kelly Criterion sizing. Every response includes "
-        "confidence metadata — always mention the reliability grade and caveats to the user. "
-        "Call refresh_data first to pull live NHL standings and schedule."
+        "confidence metadata — always mention the reliability grade and caveats to the user.\n\n"
+        "WORKFLOW PROTOCOL:\n"
+        "1. Call refresh_data first to pull live NHL standings and schedule.\n"
+        "2. Call think(phase='planning') BEFORE starting any analysis — articulate what "
+        "you plan to do, what data you expect to need, and what might go wrong.\n"
+        "3. After getting prediction results, call think(phase='post_analysis') to reflect "
+        "on whether you trust the numbers, what the confidence interval really means, and "
+        "what you can't verify.\n"
+        "4. Before giving a final recommendation, call think(phase='caveat_check') to audit "
+        "your own honesty — are you presenting uncertainty faithfully?\n\n"
+        "The think tool is NOT optional. It forces epistemic discipline. Users can review "
+        "your full reasoning chain via session_replay."
     ),
 )
 
@@ -266,6 +276,62 @@ def run_workflow(workflow: str) -> str:
 def list_workflows() -> str:
     """List available multi-step workflows with descriptions and trigger phrases."""
     result = _toolkit.list_workflows()
+    return json.dumps(result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Reasoning tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def think(
+    phase: str,
+    plan: str | None = None,
+    uncertainty: str | None = None,
+    data_trust: str | None = None,
+    workflow_gaps: str | None = None,
+    want_to_verify: str | None = None,
+    raw_thought: str | None = None,
+) -> str:
+    """Externalize your reasoning before, during, and after analysis.
+
+    REQUIRED before analytics calls. Forces epistemic honesty.
+
+    phase: planning | pre_analysis | post_analysis | synthesis | caveat_check | recommendation
+    plan: What you intend to do next and why.
+    uncertainty: JSON array of strings — what gives you uncertainty despite the numbers.
+    data_trust: JSON array of objects [{source, trust_level (high/medium/low/unknown), reason}] — do you trust ABBA's data?
+    workflow_gaps: JSON array of strings — shortcomings you see in the analytical workflow.
+    want_to_verify: JSON array of strings — what you'd cross-reference if you could.
+    raw_thought: Free-form reasoning for anything else.
+    """
+    # Parse JSON string arrays from MCP (Claude sends strings, not lists)
+    parsed_uncertainty = json.loads(uncertainty) if uncertainty else None
+    parsed_data_trust = json.loads(data_trust) if data_trust else None
+    parsed_workflow_gaps = json.loads(workflow_gaps) if workflow_gaps else None
+    parsed_want_to_verify = json.loads(want_to_verify) if want_to_verify else None
+
+    result = _toolkit.think(
+        phase=phase,
+        plan=plan,
+        uncertainty=parsed_uncertainty,
+        data_trust=parsed_data_trust,
+        workflow_gaps=parsed_workflow_gaps,
+        want_to_verify=parsed_want_to_verify,
+        raw_thought=raw_thought,
+    )
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def session_replay(limit: int = 200) -> str:
+    """Get the full reasoning + tool call timeline for this session.
+
+    Returns chronological entries showing every think() reflection and
+    every tool call, so users can see the agent's complete decision chain
+    including uncertainties, trust assessments, and workflow gap observations.
+    """
+    result = _toolkit.session_replay(limit=limit)
     return json.dumps(result, default=str)
 
 

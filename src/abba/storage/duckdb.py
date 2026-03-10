@@ -139,6 +139,23 @@ class Storage:
             )
         """)
 
+        self.conn.execute("CREATE SEQUENCE IF NOT EXISTS reasoning_seq START 1")
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS reasoning_log (
+                id INTEGER DEFAULT nextval('reasoning_seq'),
+                session_id VARCHAR NOT NULL,
+                phase VARCHAR NOT NULL,
+                plan VARCHAR,
+                uncertainty JSON,
+                data_trust JSON,
+                workflow_gaps JSON,
+                want_to_verify JSON,
+                raw_thought VARCHAR,
+                context_snapshot JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # --- NHL-specific tables ---
 
         self.conn.execute("""
@@ -496,6 +513,88 @@ class Storage:
             json.dumps(output_summary), cost, latency_ms, cache_hit,
         ])
 
+    # --- Reasoning log ---
+
+    def log_reasoning(
+        self,
+        session_id: str,
+        phase: str,
+        plan: str | None = None,
+        uncertainty: list[str] | None = None,
+        data_trust: list[dict[str, Any]] | None = None,
+        workflow_gaps: list[str] | None = None,
+        want_to_verify: list[str] | None = None,
+        raw_thought: str | None = None,
+        context_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        self.conn.execute("""
+            INSERT INTO reasoning_log
+                (session_id, phase, plan, uncertainty, data_trust,
+                 workflow_gaps, want_to_verify, raw_thought, context_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            session_id, phase, plan,
+            json.dumps(uncertainty) if uncertainty else None,
+            json.dumps(data_trust) if data_trust else None,
+            json.dumps(workflow_gaps) if workflow_gaps else None,
+            json.dumps(want_to_verify) if want_to_verify else None,
+            raw_thought,
+            json.dumps(context_snapshot) if context_snapshot else None,
+        ])
+
+    def query_reasoning_log(
+        self, session_id: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        result = self.conn.execute("""
+            SELECT * FROM reasoning_log
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, [session_id, limit]).fetchdf()
+        rows = result.to_dict("records") if len(result) > 0 else []
+        for row in rows:
+            for col in ("uncertainty", "data_trust", "workflow_gaps", "want_to_verify", "context_snapshot"):
+                if isinstance(row.get(col), str):
+                    row[col] = json.loads(row[col])
+        return rows
+
+    def query_session_replay(
+        self, session_id: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Interleave tool calls and reasoning entries chronologically."""
+        tools = self.conn.execute("""
+            SELECT id, session_id, tool_name, input_params, output_summary,
+                   cost, latency_ms, cache_hit, called_at AS ts,
+                   'tool_call' AS entry_type
+            FROM tool_call_log WHERE session_id = ?
+        """, [session_id]).fetchdf()
+
+        reasoning = self.conn.execute("""
+            SELECT id, session_id, phase, plan, uncertainty, data_trust,
+                   workflow_gaps, want_to_verify, raw_thought, context_snapshot,
+                   created_at AS ts, 'reasoning' AS entry_type
+            FROM reasoning_log WHERE session_id = ?
+        """, [session_id]).fetchdf()
+
+        import pandas as pd
+        combined = pd.concat([tools, reasoning], ignore_index=True)
+        if len(combined) == 0:
+            return []
+        combined = combined.sort_values("ts").head(limit)
+        rows = combined.to_dict("records")
+
+        # Parse JSON columns
+        for row in rows:
+            for col in ("input_params", "output_summary", "uncertainty",
+                        "data_trust", "workflow_gaps", "want_to_verify", "context_snapshot"):
+                if isinstance(row.get(col), str):
+                    row[col] = json.loads(row[col])
+            # Replace NaN with None
+            for k, v in row.items():
+                if isinstance(v, float) and v != v:  # NaN check
+                    row[k] = None
+        return rows
+
     # --- Goaltender stats ---
 
     def upsert_goaltender_stats(self, stats: list[dict[str, Any]]) -> int:
@@ -684,7 +783,8 @@ class Storage:
     KNOWN_TABLES = {
         "games", "odds_snapshots", "player_stats", "team_stats",
         "weather", "predictions_cache", "sessions", "tool_call_log",
-        "goaltender_stats", "nhl_advanced_stats", "salary_cap", "roster",
+        "reasoning_log", "goaltender_stats", "nhl_advanced_stats",
+        "salary_cap", "roster",
     }
 
     def describe_table(self, table_name: str) -> list[dict[str, Any]]:

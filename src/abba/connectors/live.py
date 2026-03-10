@@ -75,7 +75,8 @@ class NHLLiveConnector:
     def refresh(self, storage: Storage, team: str | None = None) -> dict[str, Any]:
         """Pull fresh data from NHL API and store it.
 
-        Fetches standings, schedule, and optionally roster for a team.
+        Fetches standings, schedule, and goaltender stats + rosters for
+        teams with games on the schedule (or a specific team if provided).
         """
         results: dict[str, Any] = {"source": "nhl_stats_api", "fetched_at": datetime.now().isoformat()}
 
@@ -87,10 +88,26 @@ class NHLLiveConnector:
         schedule = self._fetch_schedule(storage)
         results["schedule"] = schedule
 
-        # 3. Roster (if team specified)
+        # 3. Determine which teams need roster + goalie data
+        teams_to_fetch: set[str] = set()
         if team:
-            roster = self._fetch_roster(storage, team)
-            results["roster"] = roster
+            teams_to_fetch.add(team.upper())
+        # Auto-fetch for all teams with games on the schedule (not just today —
+        # the schedule endpoint returns ~a week of games)
+        scheduled_games = storage.query_games(sport="NHL", status="scheduled", limit=200)
+        for g in scheduled_games:
+            teams_to_fetch.add(g["home_team"])
+            teams_to_fetch.add(g["away_team"])
+
+        # 4. Fetch rosters and goaltender stats for those teams
+        if teams_to_fetch:
+            roster_results = {}
+            goalie_results = {}
+            for t in sorted(teams_to_fetch):
+                roster_results[t] = self._fetch_roster(storage, t)
+                goalie_results[t] = self._fetch_goaltender_stats(storage, t)
+            results["rosters"] = roster_results
+            results["goaltender_stats"] = goalie_results
 
         return results
 
@@ -222,6 +239,50 @@ class NHLLiveConnector:
 
         stored = storage.upsert_roster(players)
         return {"status": "ok", "players_stored": stored, "team": team}
+
+    def _fetch_goaltender_stats(self, storage: Storage, team: str) -> dict[str, Any]:
+        """Fetch goaltender season stats for a team from the NHL club stats endpoint."""
+        data = self._fetch_json(f"{self.BASE_URL}/club-stats/{team}/now")
+        if not data:
+            return {"status": "failed", "error": self._last_error or f"could not fetch club stats for {team}"}
+
+        goalies = data.get("goalies", [])
+        if not goalies:
+            return {"status": "ok", "goalies_stored": 0, "note": "no goalie data in response"}
+
+        goalie_stats = []
+        for g in goalies:
+            pid = str(g.get("playerId", ""))
+            first = g.get("firstName", {}).get("default", "")
+            last = g.get("lastName", {}).get("default", "")
+            gp = g.get("gamesPlayed", 0)
+
+            toi_seconds = g.get("timeOnIce", 0)
+            toi_minutes = toi_seconds / 60.0 if toi_seconds else 0
+
+            goalie_stats.append({
+                "goaltender_id": pid,
+                "team": team,
+                "season": "2025-26",
+                "stats": {
+                    "name": f"{first} {last}",
+                    "games_played": gp,
+                    "games_started": g.get("gamesStarted", 0),
+                    "wins": g.get("wins", 0),
+                    "losses": g.get("losses", 0),
+                    "ot_losses": g.get("overtimeLosses", 0),
+                    "save_percentage": round(g.get("savePercentage", 0), 4),
+                    "goals_against_average": round(g.get("goalsAgainstAverage", 0), 2),
+                    "goals_against": g.get("goalsAgainst", 0),
+                    "saves": g.get("saves", 0),
+                    "shots_against": g.get("shotsAgainst", 0),
+                    "shutouts": g.get("shutouts", 0),
+                    "time_on_ice_minutes": round(toi_minutes, 1),
+                },
+            })
+
+        stored = storage.upsert_goaltender_stats(goalie_stats)
+        return {"status": "ok", "goalies_stored": stored, "team": team}
 
 
 # --- Odds Live Connector (API key required) ---

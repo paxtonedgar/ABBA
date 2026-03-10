@@ -38,6 +38,7 @@ from .tools import (
     DataToolsMixin,
     MarketToolsMixin,
     NHLToolsMixin,
+    ReasoningToolsMixin,
     SessionToolsMixin,
     ToolRegistryMixin,
 )
@@ -48,6 +49,7 @@ class ABBAToolkit(
     AnalyticsToolsMixin,
     MarketToolsMixin,
     NHLToolsMixin,
+    ReasoningToolsMixin,
     SessionToolsMixin,
     ToolRegistryMixin,
 ):

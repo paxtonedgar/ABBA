@@ -9,6 +9,7 @@ from .analytics import AnalyticsToolsMixin
 from .market import MarketToolsMixin
 from .nhl import NHLToolsMixin
 from .session import SessionToolsMixin
+from .reasoning import ReasoningToolsMixin
 from .registry import ToolRegistryMixin
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "MarketToolsMixin",
     "NHLToolsMixin",
     "SessionToolsMixin",
+    "ReasoningToolsMixin",
     "ToolRegistryMixin",
 ]
