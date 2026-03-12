@@ -56,8 +56,9 @@ class SportsRadarConnector:
         self._base = BASE_URL.format(access=access)
         self._last_request: float = 0
         self._last_error: str | None = None
-        # Cached hierarchy: alias → team_id (UUID)
+        # Cached hierarchy: alias → UUID and reverse
         self._team_ids: dict[str, str] = {}
+        self._uuid_to_alias: dict[str, str] = {}
 
     def _rate_limit(self) -> None:
         """Enforce trial-tier rate limit (1 req/sec)."""
@@ -107,7 +108,11 @@ class SportsRadarConnector:
             for div in conf.get("divisions", []):
                 for t in div.get("teams", []):
                     alias = t.get("alias", "")
-                    self._team_ids[alias] = t["id"]
+                    tid = t.get("id", "")
+                    if alias and tid:
+                        self._team_ids[alias] = tid
+                        # Reverse map: UUID → alias (for standings which lack alias)
+                        self._uuid_to_alias[tid] = alias
 
     def _team_uuid(self, alias: str) -> str | None:
         """Get SportsRadar UUID for a team alias."""
@@ -138,11 +143,14 @@ class SportsRadarConnector:
             for div in conf.get("divisions", []):
                 div_name = div.get("name", "")
                 for t in div.get("teams", []):
-                    alias = t.get("alias", "")
+                    # Standings don't include 'alias' — look up from hierarchy
+                    tid = t.get("id", "")
+                    alias = t.get("alias", "") or self._uuid_to_alias.get(tid, "")
                     abbrev = self._alias_to_abbrev(alias)
-                    # Cache UUID while we have it
-                    if "id" in t:
-                        self._team_ids[alias] = t["id"]
+                    # Cache UUID if we have both
+                    if alias and tid:
+                        self._team_ids[alias] = tid
+                        self._uuid_to_alias[tid] = alias
 
                     wins = t.get("wins", 0)
                     losses = t.get("losses", 0)
@@ -494,6 +502,9 @@ class SportsRadarConnector:
             "source": "sportradar",
             "fetched_at": datetime.now().isoformat(),
         }
+
+        # 0. Load hierarchy first (1 API call) — needed for UUID lookups
+        self._ensure_hierarchy()
 
         # 1. Standings (all teams, 1 API call)
         results["standings"] = self.fetch_standings(storage, season_year)

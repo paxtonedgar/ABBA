@@ -36,7 +36,7 @@ from ..engine.value import ValueEngine
 from ..services.data import DataService
 from ..services.market import MarketService
 from ..services.prediction import PredictionService
-from ..storage import Storage
+from ..storage import Storage, create_storage
 from .tools import (
     AnalyticsToolsMixin,
     DataToolsMixin,
@@ -79,7 +79,7 @@ class ABBAToolkit(
         auto_seed: bool = True,
         session_budget: float = 1000.0,
     ):
-        self.storage = Storage(db_path)
+        self.storage = create_storage(db_path)
         self.ensemble = EnsembleEngine()
         self.features = FeatureEngine()
         self.kelly = KellyEngine()
