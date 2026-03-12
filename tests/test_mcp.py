@@ -1,10 +1,15 @@
-"""Tests for MCP and HTTP server interfaces."""
+"""Tests for MCP server interface (FastMCP-based).
+
+Validates that:
+1. All MCP tools are registered and callable
+2. Tool functions return valid JSON strings
+3. The direct Python SDK interface (ABBAToolkit) works
+"""
 
 import json
 
 import pytest
 
-from abba.server.mcp import create_mcp_server, handle_mcp_request, tools_to_mcp_schema
 from abba.server.toolkit import ABBAToolkit
 
 
@@ -13,77 +18,89 @@ def toolkit():
     return ABBAToolkit(db_path=":memory:", auto_seed=True)
 
 
-class TestMCPProtocol:
-    def test_initialize(self, toolkit):
-        req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
-        resp = handle_mcp_request(toolkit, req)
-        assert resp["id"] == 1
-        assert "serverInfo" in resp["result"]
-        assert resp["result"]["serverInfo"]["name"] == "abba"
+class TestFastMCPRegistration:
+    """Verify all expected tools are registered in the FastMCP server."""
 
-    def test_tools_list(self, toolkit):
-        req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
-        resp = handle_mcp_request(toolkit, req)
-        tools = resp["result"]["tools"]
-        assert len(tools) >= 20
-        # Every tool should have MCP-compliant schema
-        for tool in tools:
-            assert "name" in tool
-            assert "description" in tool
-            assert "inputSchema" in tool
-            assert tool["inputSchema"]["type"] == "object"
+    def test_mcp_server_importable(self):
+        """The MCP module imports without error and exposes a FastMCP instance."""
+        from abba.server.mcp import mcp
+        assert mcp is not None
+        assert mcp.name == "ABBA Sports Analytics"
 
-    def test_tools_call(self, toolkit):
-        req = {
-            "jsonrpc": "2.0", "id": 3,
-            "method": "tools/call",
-            "params": {"name": "list_sources", "arguments": {}},
+    def test_all_expected_tools_registered(self):
+        """Every expected tool name is registered on the FastMCP server."""
+        from abba.server.mcp import mcp
+
+        expected_tools = {
+            "query_games", "query_odds", "query_team_stats", "list_sources",
+            "describe_dataset", "predict_game", "explain_prediction",
+            "nhl_predict_game", "find_value", "compare_odds", "calculate_ev",
+            "kelly_sizing", "query_goaltender_stats", "query_advanced_stats",
+            "query_cap_data", "query_roster", "season_review", "playoff_odds",
+            "refresh_data", "session_budget", "run_workflow", "list_workflows",
+            "think", "session_replay",
         }
-        resp = handle_mcp_request(toolkit, req)
-        content = resp["result"]["content"]
-        assert len(content) == 1
-        data = json.loads(content[0]["text"])
-        assert "sources" in data
-
-    def test_tools_call_with_args(self, toolkit):
-        req = {
-            "jsonrpc": "2.0", "id": 4,
-            "method": "tools/call",
-            "params": {"name": "query_games", "arguments": {"sport": "MLB"}},
-        }
-        resp = handle_mcp_request(toolkit, req)
-        data = json.loads(resp["result"]["content"][0]["text"])
-        assert data["count"] > 0
-
-    def test_resources_list(self, toolkit):
-        req = {"jsonrpc": "2.0", "id": 5, "method": "resources/list", "params": {}}
-        resp = handle_mcp_request(toolkit, req)
-        resources = resp["result"]["resources"]
-        uris = [r["uri"] for r in resources]
-        assert any("games" in uri for uri in uris)
-
-    def test_unknown_method(self, toolkit):
-        req = {"jsonrpc": "2.0", "id": 6, "method": "bogus/method", "params": {}}
-        resp = handle_mcp_request(toolkit, req)
-        assert "error" in resp
-        assert resp["error"]["code"] == -32601
+        registered = set(mcp._tool_manager._tools.keys())
+        missing = expected_tools - registered
+        assert not missing, f"Missing MCP tools: {missing}"
 
 
-class TestMCPSchema:
-    def test_schema_generation(self, toolkit):
-        tools = tools_to_mcp_schema(toolkit)
-        predict = next(t for t in tools if t["name"] == "predict_game")
-        assert "game_id" in predict["inputSchema"]["properties"]
-        assert "game_id" in predict["inputSchema"]["required"]
+class TestMCPToolFunctions:
+    """Call each MCP tool function directly to verify they return valid JSON."""
 
-    def test_server_info(self):
-        info = create_mcp_server()
-        assert info["name"] == "abba"
-        assert "tools" in info["capabilities"]
+    def test_list_sources(self):
+        from abba.server.mcp import list_sources
+        result = json.loads(list_sources())
+        assert "sources" in result
+
+    def test_query_games(self):
+        from abba.server.mcp import query_games
+        result = json.loads(query_games(sport="NHL"))
+        assert "games" in result
+
+    def test_query_team_stats(self):
+        from abba.server.mcp import query_team_stats
+        result = json.loads(query_team_stats(sport="NHL"))
+        assert "teams" in result
+
+    def test_describe_dataset(self):
+        from abba.server.mcp import describe_dataset
+        result = json.loads(describe_dataset(table="games"))
+        assert isinstance(result, (list, dict))
+
+    def test_calculate_ev(self):
+        from abba.server.mcp import calculate_ev
+        result = json.loads(calculate_ev(win_probability=0.55, decimal_odds=2.0))
+        assert "expected_value" in result
+
+    def test_kelly_sizing(self):
+        from abba.server.mcp import kelly_sizing
+        result = json.loads(kelly_sizing(win_probability=0.55, decimal_odds=2.0))
+        assert "recommended_stake" in result or "fraction" in result
+
+    def test_session_budget(self):
+        from abba.server.mcp import session_budget
+        result = json.loads(session_budget())
+        assert isinstance(result, dict)
+
+    def test_list_workflows(self):
+        from abba.server.mcp import list_workflows
+        result = json.loads(list_workflows())
+        assert isinstance(result, dict)
+
+    def test_predict_game_nonexistent(self):
+        from abba.server.mcp import predict_game
+        result = json.loads(predict_game(game_id="nonexistent"))
+        assert "error" in result
+
+    def test_nhl_predict_game_nonexistent(self):
+        from abba.server.mcp import nhl_predict_game
+        result = json.loads(nhl_predict_game(game_id="nonexistent"))
+        assert "error" in result
 
 
 class TestDirectSDK:
-    """Test the direct Python import path -- the most stable interface."""
+    """Test the direct Python import path — the most stable interface."""
 
     def test_import_and_use(self):
         from abba import ABBAToolkit
@@ -96,7 +113,6 @@ class TestDirectSDK:
         from abba import ABBAToolkit
         tk = ABBAToolkit()
         tool_names = [t["name"] for t in tk.list_tools()]
-        # Verify each name resolves (call with safe defaults)
         safe_args: dict[str, dict] = {
             "describe_dataset": {"table": "games"},
             "predict_game": {"game_id": "nonexistent"},

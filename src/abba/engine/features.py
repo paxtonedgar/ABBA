@@ -100,12 +100,12 @@ class FeatureEngine:
         return np.array([features.get(k, 0.0) for k in keys], dtype=np.float64)
 
     def predict_from_features(self, features: dict[str, float]) -> list[float]:
-        """Generate multiple model-like predictions from features.
+        """Generate heuristic predictions from features.
 
-        Uses different weighting strategies to simulate ensemble diversity.
-        These are heuristic models -- they produce reasonable predictions
-        from the feature set without requiring trained sklearn models.
-        Real deployment would swap these for serialized model artifacts.
+        WARNING: These are rule-based heuristics, NOT trained ML models.
+        They produce plausible predictions by combining features with
+        hand-tuned weights. For NHL games, use HockeyAnalytics.predict_nhl_game()
+        which has sport-specific models. This method is for non-NHL sports only.
         """
         hw = features.get("home_win_pct", 0.5)
         aw = features.get("away_win_pct", 0.5)
@@ -119,8 +119,8 @@ class FeatureEngine:
 
         # Model 1: Win percentage + home advantage (log5 method)
         # log5: P(A beats B) = (pA - pA*pB) / (pA + pB - 2*pA*pB)
-        pa = hw
-        pb = aw
+        pa = max(0.01, min(0.99, hw))
+        pb = max(0.01, min(0.99, aw))
         denom = pa + pb - 2 * pa * pb
         if abs(denom) < 1e-8:
             m1 = 0.5

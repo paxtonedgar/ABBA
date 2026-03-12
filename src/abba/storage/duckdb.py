@@ -13,7 +13,38 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import numpy as np
+
+from ..types import (
+    AdvancedStatsRecord,
+    Game,
+    GoaltenderStatsRecord,
+    OddsSnapshot,
+    RosterPlayer,
+    TeamStatsRecord,
+)
+
+
+class StorageValidationError(ValueError):
+    """Raised when data fails schema validation on write."""
+
+
+# Minimal required keys for JSON stats blobs.
+# These catch the most common data corruption (missing fields, wrong schema).
+_TEAM_STATS_REQUIRED = {"wins", "losses"}
+_GOALIE_STATS_REQUIRED = {"save_pct", "gaa"}
+_ADVANCED_STATS_REQUIRED = {"corsi_pct"}
+
+
+def _validate_stats_keys(stats: dict[str, Any], required: set[str], context: str) -> None:
+    """Raise StorageValidationError if required keys are missing from stats blob."""
+    if not stats:
+        return  # empty stats are allowed (will be filled later)
+    missing = required - set(stats.keys())
+    if missing:
+        raise StorageValidationError(
+            f"Stats blob for {context} missing required keys: {missing}. "
+            f"Got keys: {set(stats.keys())}"
+        )
 
 
 class Storage:
@@ -23,6 +54,15 @@ class Storage:
         self.db_path = db_path
         self.conn = duckdb.connect(db_path)
         self._init_schema()
+
+    @staticmethod
+    def _fetchdicts(cursor: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+        """Convert a DuckDB cursor result to a list of dicts using fetchall()."""
+        desc = cursor.description
+        if not desc:
+            return []
+        cols = [d[0] for d in desc]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
 
     def _init_schema(self) -> None:
         # Create sequences first (before tables that reference them)
@@ -210,7 +250,85 @@ class Storage:
             )
         """)
 
-        # (sequences created above, before tables)
+        # --- Data freshness tracking ---
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS data_freshness (
+                table_name VARCHAR PRIMARY KEY,
+                last_refresh_at TIMESTAMP NOT NULL,
+                source VARCHAR DEFAULT 'unknown',
+                row_count INTEGER DEFAULT 0
+            )
+        """)
+
+        # Standings snapshots — daily captures for leakage-free backtesting.
+        # Each row is one team's stats on one date. This accumulates over time
+        # so we can reconstruct "what did we know on date X" without lookahead bias.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS standings_snapshots (
+                snapshot_date DATE NOT NULL,
+                team_id VARCHAR NOT NULL,
+                sport VARCHAR DEFAULT 'NHL',
+                stats JSON NOT NULL,
+                PRIMARY KEY (snapshot_date, team_id)
+            )
+        """)
+
+    # --- Data freshness ---
+
+    def record_refresh(self, table_name: str, source: str = "unknown", row_count: int = 0) -> None:
+        """Record that a table was refreshed."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO data_freshness (table_name, last_refresh_at, source, row_count)
+            VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+        """, [table_name, source, row_count])
+
+    def get_last_refresh(self, table_name: str) -> float | None:
+        """Return Unix timestamp of last refresh for a table, or None."""
+        row = self.conn.execute(
+            "SELECT epoch(last_refresh_at) FROM data_freshness WHERE table_name = ?",
+            [table_name],
+        ).fetchone()
+        return float(row[0]) if row else None
+
+    # --- Standings snapshots (for leakage-free backtesting) ---
+
+    def snapshot_standings(self, snapshot_date: str, team_stats: list[dict[str, Any]]) -> int:
+        """Capture today's standings as a snapshot for future backtesting.
+
+        Call this during refresh_data to accumulate point-in-time data.
+        """
+        if not team_stats:
+            return 0
+        for s in team_stats:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO standings_snapshots (snapshot_date, team_id, sport, stats)
+                VALUES (?, ?, ?, ?)
+            """, [snapshot_date, s["team_id"], s.get("sport", "NHL"), json.dumps(s.get("stats", {}))])
+        return len(team_stats)
+
+    def get_standings_snapshot(self, snapshot_date: str, team_id: str | None = None) -> list[dict[str, Any]]:
+        """Retrieve standings as they were on a given date."""
+        conditions = ["snapshot_date = ?"]
+        params: list[Any] = [snapshot_date]
+        if team_id:
+            conditions.append("UPPER(team_id) = UPPER(?)")
+            params.append(team_id)
+        where = " AND ".join(conditions)
+        rows = self._fetchdicts(self.conn.execute(
+            f"SELECT * FROM standings_snapshots WHERE {where}", params
+        ))
+        for row in rows:
+            if isinstance(row.get("stats"), str):
+                row["stats"] = json.loads(row["stats"])
+        return rows
+
+    def get_snapshot_dates(self) -> list[str]:
+        """Return all dates for which we have standings snapshots."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT snapshot_date FROM standings_snapshots ORDER BY snapshot_date"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
 
     # --- Games ---
 
@@ -240,7 +358,7 @@ class Storage:
         team: str | None = None,
         status: str | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Game]:
         conditions = []
         params = []
 
@@ -267,8 +385,7 @@ class Storage:
         query = f"SELECT * FROM games {where} ORDER BY date DESC LIMIT ?"
         params.append(limit)
 
-        result = self.conn.execute(query, params).fetchdf()
-        return result.to_dict("records") if len(result) > 0 else []
+        return self._fetchdicts(self.conn.execute(query, params))
 
     # --- Odds ---
 
@@ -293,7 +410,7 @@ class Storage:
         sportsbook: str | None = None,
         latest_only: bool = True,
         hours_back: int = 24,
-    ) -> list[dict[str, Any]]:
+    ) -> list[OddsSnapshot]:
         conditions = []
         params: list[Any] = []
 
@@ -319,8 +436,7 @@ class Storage:
         else:
             query = f"SELECT * FROM odds_snapshots {where} ORDER BY captured_at DESC"
 
-        result = self.conn.execute(query, params).fetchdf()
-        return result.to_dict("records") if len(result) > 0 else []
+        return self._fetchdicts(self.conn.execute(query, params))
 
     # --- Player stats ---
 
@@ -361,10 +477,9 @@ class Storage:
             params.append(f"%{team}%")
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(
+        rows = self._fetchdicts(self.conn.execute(
             f"SELECT * FROM player_stats {where}", params
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        ))
         for row in rows:
             if isinstance(row.get("stats"), str):
                 row["stats"] = json.loads(row["stats"])
@@ -376,6 +491,7 @@ class Storage:
         if not stats:
             return 0
         for s in stats:
+            _validate_stats_keys(s.get("stats", {}), _TEAM_STATS_REQUIRED, f"team_stats:{s.get('team_id', '?')}")
             self.conn.execute("""
                 INSERT OR REPLACE INTO team_stats (team_id, sport, season, stats, source)
                 VALUES (?, ?, ?, ?, ?)
@@ -387,11 +503,11 @@ class Storage:
         team_id: str | None = None,
         sport: str | None = None,
         season: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[TeamStatsRecord]:
         conditions = []
         params = []
         if team_id:
-            conditions.append("team_id = ?")
+            conditions.append("UPPER(team_id) = UPPER(?)")
             params.append(team_id)
         if sport:
             conditions.append("sport = ?")
@@ -401,10 +517,9 @@ class Storage:
             params.append(season)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(
-            f"SELECT * FROM team_stats {where}", params
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        rows = self._fetchdicts(self.conn.execute(
+            f"SELECT * FROM team_stats {where} ORDER BY season DESC", params
+        ))
         for row in rows:
             if isinstance(row.get("stats"), str):
                 row["stats"] = json.loads(row["stats"])
@@ -425,11 +540,10 @@ class Storage:
         ])
 
     def get_weather(self, game_id: str) -> dict[str, Any] | None:
-        result = self.conn.execute(
+        rows = self._fetchdicts(self.conn.execute(
             "SELECT * FROM weather WHERE game_id = ? ORDER BY captured_at DESC LIMIT 1",
             [game_id],
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        ))
         return rows[0] if rows else None
 
     # --- Prediction cache ---
@@ -475,10 +589,9 @@ class Storage:
         return {"session_id": session_id, "budget_remaining": budget}
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
-        result = self.conn.execute(
+        rows = self._fetchdicts(self.conn.execute(
             "SELECT * FROM sessions WHERE session_id = ?", [session_id]
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        ))
         return rows[0] if rows else None
 
     def charge_session(self, session_id: str, cost: float) -> float:
@@ -545,13 +658,12 @@ class Storage:
     def query_reasoning_log(
         self, session_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
-        result = self.conn.execute("""
+        rows = self._fetchdicts(self.conn.execute("""
             SELECT * FROM reasoning_log
             WHERE session_id = ?
             ORDER BY created_at ASC
             LIMIT ?
-        """, [session_id, limit]).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        """, [session_id, limit]))
         for row in rows:
             for col in ("uncertainty", "data_trust", "workflow_gaps", "want_to_verify", "context_snapshot"):
                 if isinstance(row.get(col), str):
@@ -561,38 +673,51 @@ class Storage:
     def query_session_replay(
         self, session_id: str, limit: int = 200
     ) -> list[dict[str, Any]]:
-        """Interleave tool calls and reasoning entries chronologically."""
-        tools = self.conn.execute("""
+        """Interleave tool calls and reasoning entries chronologically via SQL UNION ALL."""
+        rows_raw = self.conn.execute("""
             SELECT id, session_id, tool_name, input_params, output_summary,
-                   cost, latency_ms, cache_hit, called_at AS ts,
-                   'tool_call' AS entry_type
+                   cost, latency_ms, cache_hit,
+                   NULL AS phase, NULL AS plan, NULL AS uncertainty,
+                   NULL AS data_trust, NULL AS workflow_gaps,
+                   NULL AS want_to_verify, NULL AS raw_thought,
+                   NULL AS context_snapshot,
+                   called_at AS ts, 'tool_call' AS entry_type
             FROM tool_call_log WHERE session_id = ?
-        """, [session_id]).fetchdf()
-
-        reasoning = self.conn.execute("""
-            SELECT id, session_id, phase, plan, uncertainty, data_trust,
-                   workflow_gaps, want_to_verify, raw_thought, context_snapshot,
+            UNION ALL
+            SELECT id, session_id, NULL, NULL, NULL,
+                   NULL, NULL, NULL,
+                   phase, plan, uncertainty,
+                   data_trust, workflow_gaps,
+                   want_to_verify, raw_thought,
+                   context_snapshot,
                    created_at AS ts, 'reasoning' AS entry_type
             FROM reasoning_log WHERE session_id = ?
-        """, [session_id]).fetchdf()
+            ORDER BY ts ASC
+            LIMIT ?
+        """, [session_id, session_id, limit]).fetchall()
 
-        import pandas as pd
-        combined = pd.concat([tools, reasoning], ignore_index=True)
-        if len(combined) == 0:
+        if not rows_raw:
             return []
-        combined = combined.sort_values("ts").head(limit)
-        rows = combined.to_dict("records")
 
-        # Parse JSON columns
+        columns = [
+            "id", "session_id", "tool_name", "input_params", "output_summary",
+            "cost", "latency_ms", "cache_hit",
+            "phase", "plan", "uncertainty", "data_trust", "workflow_gaps",
+            "want_to_verify", "raw_thought", "context_snapshot",
+            "ts", "entry_type",
+        ]
+        rows = [dict(zip(columns, row)) for row in rows_raw]
+
+        # Parse JSON columns and clean nulls
+        json_cols = ("input_params", "output_summary", "uncertainty",
+                     "data_trust", "workflow_gaps", "want_to_verify", "context_snapshot")
         for row in rows:
-            for col in ("input_params", "output_summary", "uncertainty",
-                        "data_trust", "workflow_gaps", "want_to_verify", "context_snapshot"):
-                if isinstance(row.get(col), str):
-                    row[col] = json.loads(row[col])
-            # Replace NaN with None
-            for k, v in row.items():
-                if isinstance(v, float) and v != v:  # NaN check
-                    row[k] = None
+            for col in json_cols:
+                val = row.get(col)
+                if isinstance(val, str):
+                    row[col] = json.loads(val)
+            # Remove None-valued keys from the non-applicable type
+            row = {k: v for k, v in row.items() if v is not None}
         return rows
 
     # --- Goaltender stats ---
@@ -601,6 +726,7 @@ class Storage:
         if not stats:
             return 0
         for s in stats:
+            _validate_stats_keys(s.get("stats", {}), _GOALIE_STATS_REQUIRED, f"goaltender_stats:{s.get('goaltender_id', '?')}")
             self.conn.execute("""
                 INSERT OR REPLACE INTO goaltender_stats (goaltender_id, team, season, stats)
                 VALUES (?, ?, ?, ?)
@@ -612,7 +738,7 @@ class Storage:
         goaltender_id: str | None = None,
         team: str | None = None,
         season: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[GoaltenderStatsRecord]:
         conditions = []
         params = []
         if goaltender_id:
@@ -625,8 +751,9 @@ class Storage:
             conditions.append("season = ?")
             params.append(season)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(f"SELECT * FROM goaltender_stats {where}", params).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        rows = self._fetchdicts(self.conn.execute(
+            f"SELECT * FROM goaltender_stats {where} ORDER BY season DESC", params
+        ))
         for row in rows:
             if isinstance(row.get("stats"), str):
                 row["stats"] = json.loads(row["stats"])
@@ -638,6 +765,7 @@ class Storage:
         if not stats:
             return 0
         for s in stats:
+            _validate_stats_keys(s.get("stats", {}), _ADVANCED_STATS_REQUIRED, f"nhl_advanced_stats:{s.get('team_id', '?')}")
             self.conn.execute("""
                 INSERT OR REPLACE INTO nhl_advanced_stats (team_id, season, stats)
                 VALUES (?, ?, ?)
@@ -648,18 +776,19 @@ class Storage:
         self,
         team_id: str | None = None,
         season: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[AdvancedStatsRecord]:
         conditions = []
         params = []
         if team_id:
-            conditions.append("team_id = ?")
+            conditions.append("UPPER(team_id) = UPPER(?)")
             params.append(team_id)
         if season:
             conditions.append("season = ?")
             params.append(season)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(f"SELECT * FROM nhl_advanced_stats {where}", params).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        rows = self._fetchdicts(self.conn.execute(
+            f"SELECT * FROM nhl_advanced_stats {where}", params
+        ))
         for row in rows:
             if isinstance(row.get("stats"), str):
                 row["stats"] = json.loads(row["stats"])
@@ -692,7 +821,7 @@ class Storage:
         conditions = []
         params = []
         if team:
-            conditions.append("team = ?")
+            conditions.append("UPPER(team) = UPPER(?)")
             params.append(team)
         if season:
             conditions.append("season = ?")
@@ -701,10 +830,9 @@ class Storage:
             conditions.append("position = ?")
             params.append(position)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(
+        return self._fetchdicts(self.conn.execute(
             f"SELECT * FROM salary_cap {where} ORDER BY cap_hit DESC", params
-        ).fetchdf()
-        return result.to_dict("records") if len(result) > 0 else []
+        ))
 
     # --- Roster ---
 
@@ -728,11 +856,11 @@ class Storage:
         team: str | None = None,
         season: str | None = None,
         position: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RosterPlayer]:
         conditions = []
         params = []
         if team:
-            conditions.append("team = ?")
+            conditions.append("UPPER(team) = UPPER(?)")
             params.append(team)
         if season:
             conditions.append("season = ?")
@@ -741,10 +869,9 @@ class Storage:
             conditions.append("position = ?")
             params.append(position)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        result = self.conn.execute(
+        rows = self._fetchdicts(self.conn.execute(
             f"SELECT * FROM roster {where} ORDER BY line_number ASC, name", params
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        ))
         for row in rows:
             if isinstance(row.get("stats"), str):
                 row["stats"] = json.loads(row["stats"])
@@ -752,29 +879,28 @@ class Storage:
 
     # --- Direct lookups ---
 
-    def get_game_by_id(self, game_id: str) -> dict[str, Any] | None:
+    def get_game_by_id(self, game_id: str) -> Game | None:
         """Fetch a single game by ID. O(1) via primary key instead of scanning all games."""
-        result = self.conn.execute(
+        rows = self._fetchdicts(self.conn.execute(
             "SELECT * FROM games WHERE game_id = ?", [game_id]
-        ).fetchdf()
-        rows = result.to_dict("records") if len(result) > 0 else []
+        ))
         return rows[0] if rows else None
 
     # --- Schema discovery ---
 
     def list_tables(self) -> list[dict[str, Any]]:
-        result = self.conn.execute("""
-            SELECT table_name, estimated_size
+        table_rows = self.conn.execute("""
+            SELECT table_name
             FROM duckdb_tables()
             WHERE schema_name = 'main'
-        """).fetchdf()
+        """).fetchall()
         tables = []
-        for _, row in result.iterrows():
+        for (tname,) in table_rows:
             count = self.conn.execute(
-                f"SELECT COUNT(*) FROM {row['table_name']}"
+                f"SELECT COUNT(*) FROM {tname}"
             ).fetchone()[0]
             tables.append({
-                "table": row["table_name"],
+                "table": tname,
                 "row_count": count,
             })
         return tables
@@ -784,17 +910,14 @@ class Storage:
         "games", "odds_snapshots", "player_stats", "team_stats",
         "weather", "predictions_cache", "sessions", "tool_call_log",
         "reasoning_log", "goaltender_stats", "nhl_advanced_stats",
-        "salary_cap", "roster",
+        "salary_cap", "roster", "data_freshness", "standings_snapshots",
     }
 
     def describe_table(self, table_name: str) -> list[dict[str, Any]]:
         # Validate table name against known schema to prevent SQL injection
         if table_name not in self.KNOWN_TABLES:
             return [{"error": f"unknown table: {table_name}"}]
-        result = self.conn.execute(
-            f"DESCRIBE {table_name}"
-        ).fetchdf()
-        return result.to_dict("records") if len(result) > 0 else []
+        return self._fetchdicts(self.conn.execute(f"DESCRIBE {table_name}"))
 
     def close(self) -> None:
         self.conn.close()

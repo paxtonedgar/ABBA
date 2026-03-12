@@ -1,27 +1,23 @@
-"""Honest backtest of ABBA's NHL prediction workflow.
+"""ARCHIVED — Biased backtest (lookahead contamination).
 
-This test pulls REAL completed NHL games and standings from the live API,
-runs our prediction models against games that already happened, and measures
-how well the models actually perform.
+*** DO NOT use these metrics for model validation or accuracy claims. ***
 
-KNOWN LIMITATION — LOOKAHEAD BIAS:
-    We fetch today's standings and use them to predict games from the recent
-    past. Those standings already incorporate the results of the games we are
-    predicting, which inflates model accuracy. A truly unbiased backtest would
-    require historical daily standings snapshots, which the public NHL API does
-    not provide. To mitigate:
-      - We use a SHORT lookback window (5 days) so the contamination is small
-        relative to the full-season standings.
-      - We document this bias prominently so consumers of these results know
-        the numbers are optimistic.
+This backtest uses TODAY's standings to predict PAST games, which means
+the model has indirect access to outcomes (lookahead bias). Reported metrics
+are optimistic.
 
-The backtest is honest *within the above limitation* because:
-1. We use real data from the NHL API (not our seed data)
-2. We measure calibration (predicted 60% -> should win ~60% of the time)
-3. We measure log loss (proper scoring rule, penalizes overconfidence)
-4. We measure AUC (discrimination ability)
-5. We report edge over baseline (home team always wins / coin flip)
-6. We test the full toolkit pipeline, not just the math functions
+A leakage-free replacement is being built using the standings_snapshots table.
+Once enough daily snapshots accumulate (30+ days), a proper walk-forward
+backtest can be constructed that only uses data available BEFORE each game.
+
+The infrastructure for this is in place:
+  - Storage: standings_snapshots table (snapshot_date, team_id, stats)
+  - Capture: refresh_data() auto-snapshots standings on each NHL refresh
+  - Query: storage.get_standings_snapshot(date, team_id)
+
+This file is kept for reference and to maintain test count continuity.
+It documents what an honest backtest looks like structurally — calibration bins,
+Brier score, log loss, baseline comparison — which the replacement will inherit.
 
 Requires internet access to fetch from api-web.nhle.com (free, no auth).
 """

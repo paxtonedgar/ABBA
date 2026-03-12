@@ -1,0 +1,46 @@
+name: trust-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  trust-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run contract tests
+        run: |
+          python -m pytest \
+            tests/test_predictor_family_invariants.py \
+            tests/test_schema_contracts_nhl_live.py \
+            tests/test_odds_schedule_identity.py \
+            tests/test_snapshot_provenance.py \
+            tests/test_goalie_selection_invariants.py \
+            tests/test_season_selection_invariants.py \
+            -m contract --strict-markers -v --tb=short
+
+      - name: Verify success criteria
+        if: success()
+        run: |
+          echo "trust-check passed — all contract invariants hold"
+          echo "  - Missing data fails closed"
+          echo "  - NHL money workflows use correct predictor"
+          echo "  - Goalie data aligns with model inputs"
+          echo "  - Odds events join to schedule events"
+          echo "  - Prediction outputs carry provenance metadata"

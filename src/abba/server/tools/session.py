@@ -14,42 +14,11 @@ class SessionToolsMixin:
         source: str = "all",
         team: str | None = None,
     ) -> dict[str, Any]:
-        """Refresh data from live sources."""
+        """Refresh data from live sources. Delegates to DataService."""
         start = time.time()
-        from ...connectors.live import NHLLiveConnector, OddsLiveConnector
-
-        results: dict[str, Any] = {}
-
-        if source in ("nhl", "all"):
-            nhl = NHLLiveConnector()
-            try:
-                nhl_result = nhl.refresh(self.storage, team=team)
-                results["nhl"] = nhl_result
-            except Exception as e:
-                results["nhl"] = {"error": str(e)}
-
-        if source in ("odds", "all"):
-            odds = OddsLiveConnector()
-            try:
-                odds_result = odds.refresh(self.storage)
-                results["odds"] = odds_result
-            except Exception as e:
-                results["odds"] = {"error": str(e)}
-
-        errors = {k: v["error"] for k, v in results.items() if isinstance(v, dict) and "error" in v}
-
-        # Track freshness — any successful refresh updates the timestamp
-        successes = {k for k, v in results.items() if isinstance(v, dict) and "error" not in v}
-        if successes:
-            self._last_refresh_ts = time.time()
-
-        result = {
-            "refreshed_sources": list(results.keys()),
-            "details": results,
-        }
-        if errors:
-            result["errors"] = errors
-            result["warning"] = "Some data sources failed to refresh. Predictions may use stale data."
+        result = self.data_service.refresh(source=source, team=team)
+        # Sync refresh timestamp back to toolkit level
+        self._last_refresh_ts = self.data_service.last_refresh_ts
         return self._track("refresh_data", {"source": source, "team": team}, result, start)
 
     def run_workflow(self, workflow: str, **kwargs: Any) -> dict[str, Any]:

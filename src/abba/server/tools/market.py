@@ -15,39 +15,19 @@ class MarketToolsMixin:
         date: str | None = None,
         min_ev: float = 0.03,
     ) -> dict[str, Any]:
-        """Scan for +EV betting opportunities."""
+        """Scan for +EV betting opportunities.
+
+        Routes by sport: NHL → nhl_predict_game, others → predict_game.
+        Delegates to MarketService which handles the sport-based routing.
+        """
         start = time.time()
-
-        games = self.storage.query_games(sport=sport, date=date, status="scheduled")
-        if not games:
-            return self._track("find_value", {"sport": sport, "date": date},
-                               {"opportunities": [], "count": 0, "games_scanned": 0}, start)
-
-        predictions: dict[str, float] = {}
-        for g in games:
-            gid = g.get("game_id", "")
-            pred = self.predict_game(gid)
-            pred_data = pred.get("prediction", {})
-            if isinstance(pred_data, dict) and "value" in pred_data:
-                predictions[gid] = pred_data["value"]
-
-        all_odds = self.storage.query_odds(latest_only=True)
-
-        self.value.min_ev = min_ev
-        opportunities = self.value.find_value(games, predictions, all_odds)
-
-        result = {
-            "opportunities": opportunities[:20],
-            "count": len(opportunities),
-            "games_scanned": len(games),
-        }
+        result = self.market.find_value(sport=sport, date=date, min_ev=min_ev)
         return self._track("find_value", {"sport": sport, "min_ev": min_ev}, result, start)
 
     def compare_odds(self, game_id: str) -> dict[str, Any]:
-        """Compare odds across sportsbooks for a game."""
+        """Compare odds across sportsbooks for a game. Delegates to MarketService."""
         start = time.time()
-        all_odds = self.storage.query_odds(game_id=game_id, latest_only=True)
-        result = self.value.compare_odds(all_odds, game_id)
+        result = self.market.compare_odds(game_id)
         return self._track("compare_odds", {"game_id": game_id}, result, start)
 
     def calculate_ev(

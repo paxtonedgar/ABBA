@@ -117,7 +117,7 @@ def describe_dataset(table: str) -> str:
 
 @mcp.tool()
 def predict_game(game_id: str, method: str = "weighted") -> str:
-    """Ensemble prediction for a game — returns home win probability with confidence interval."""
+    """Ensemble prediction for a game. NHL games delegate to the NHL-specific predictor. Returns home win probability with confidence metadata."""
     result = _toolkit.predict_game(game_id=game_id, method=method)
     return json.dumps(result, default=str)
 
@@ -131,7 +131,7 @@ def explain_prediction(game_id: str) -> str:
 
 @mcp.tool()
 def nhl_predict_game(game_id: str, method: str = "weighted") -> str:
-    """NHL-specific 8-model prediction: Corsi, xG, goaltender matchup, Elo, player impact, special teams, and rest."""
+    """NHL-specific multi-model prediction (up to 9 models when ML is trained). Includes data provenance, defaulted-feature tracking, and fail-closed guards on missing data."""
     result = _toolkit.nhl_predict_game(game_id=game_id, method=method)
     return json.dumps(result, default=str)
 
@@ -146,7 +146,7 @@ def find_value(
     date: str | None = None,
     min_ev: float = 0.03,
 ) -> str:
-    """Scan for +EV betting opportunities across all scheduled games."""
+    """Scan for +EV betting opportunities across scheduled games. Requires odds data (ODDS_API_KEY) to function."""
     result = _toolkit.find_value(sport=sport, date=date, min_ev=min_ev)
     return json.dumps(result, default=str)
 
@@ -239,7 +239,7 @@ def playoff_odds(
     division_cutline: int = 90,
     wildcard_cutline: int = 95,
 ) -> str:
-    """Estimate playoff probability from current points pace using Monte Carlo simulation."""
+    """Estimate playoff probability from current points pace using Monte Carlo simulation. Uses seed data or live stats if refreshed."""
     result = _toolkit.playoff_odds(
         team_id=team_id, season=season,
         division_cutline=division_cutline, wildcard_cutline=wildcard_cutline,
@@ -267,7 +267,7 @@ def session_budget() -> str:
 
 @mcp.tool()
 def run_workflow(workflow: str) -> str:
-    """Run a multi-step analytical workflow: game_prediction, tonights_slate, season_story, value_scan, betting_strategy, etc."""
+    """Run a multi-step analytical workflow. Available: game_prediction, tonights_slate, season_story, value_scan, cap_strategy, playoff_race, goaltender_duel, team_comparison, betting_strategy."""
     result = _toolkit.run_workflow(workflow=workflow)
     return json.dumps(result, default=str)
 

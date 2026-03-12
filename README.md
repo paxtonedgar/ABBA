@@ -1,239 +1,184 @@
 # ABBA
 
-Sports analytics toolkit that AI agents call natively. DuckDB-backed data store, ensemble ML predictions, real-time odds scanning, and Kelly Criterion position sizing -- exposed as callable tools that any agent framework can discover and use.
+ABBA is a DuckDB-backed sports analytics toolkit for agent workflows. It exposes query, prediction, market, and workflow tools through three interfaces:
 
-Solves the stale data problem: LLMs hallucinate sports records, get rosters wrong, and have no idea about recent outcomes. ABBA provides a live, queryable data layer the agent can trust, with freshness metadata on every response.
+- direct Python import
+- a small HTTP server
+- an MCP server
 
-## Three ways to use it
+The active runtime path lives under `src/abba/server`, `src/abba/engine`, `src/abba/storage`, and `src/abba/workflows`.
 
-**1. Direct Python import** (most stable)
+## What It Does
+
+- Queries games, odds, team stats, rosters, and NHL-specific datasets
+- Produces general game predictions and NHL-specific predictions
+- Calculates EV and Kelly sizing
+- Runs multi-step workflows such as `game_prediction`, `tonights_slate`, and `betting_strategy`
+- Stores local data in DuckDB for repeatable development and testing
+
+Current toolkit surface: `23` callable tools.
+
+## Quick Start
+
+### Install for local development
+
+```bash
+git clone https://github.com/paxtonedgar/ABBA.git
+cd abba-nhl
+pip install -e ".[dev]"
+```
+
+### Use from Python
+
 ```python
 from abba import ABBAToolkit
 
-toolkit = ABBAToolkit()
-tools = toolkit.list_tools()  # discover all 21 tools
+toolkit = ABBAToolkit(db_path=":memory:", auto_seed=True)
 
-# Pull real data from NHL API (free, no auth)
-toolkit.refresh_data(source="nhl", team="NYR")
-
-# Query live standings, predict games, find value
+tools = toolkit.list_tools()
 games = toolkit.query_games(sport="NHL", status="scheduled")
-prediction = toolkit.nhl_predict_game(game_id=games["games"][0]["game_id"])
-review = toolkit.season_review(team_id="NYR")
-cap = toolkit.query_cap_data(team="NYR")
-roster = toolkit.query_roster(team="NYR")
+
+if games["count"]:
+    game_id = games["games"][0]["game_id"]
+    prediction = toolkit.nhl_predict_game(game_id)
+    odds = toolkit.compare_odds(game_id)
 ```
 
-**2. HTTP REST API** (language-agnostic)
+### Run the HTTP server
+
 ```bash
-pip install abba
-abba-server  # starts on :8420
-
-# Discovery
-curl localhost:8420/tools
-
-# Call a tool
-curl -X POST localhost:8420/tools/call \
-  -d '{"name": "nhl_predict_game", "arguments": {"game_id": "nhl-2025021061"}}'
+abba-server
 ```
 
-**3. MCP server** (for Claude Desktop / MCP-compatible agents)
+Then call:
+
+```bash
+curl http://localhost:8420/tools
+curl -X POST http://localhost:8420/tools/call \
+  -H "Content-Type: application/json" \
+  -d '{"name":"list_sources","arguments":{}}'
+```
+
+### Run the MCP server
+
+```bash
+abba-mcp
+```
+
+Example MCP config:
+
 ```json
 {
   "mcpServers": {
     "abba": {
-      "command": "python",
-      "args": ["-m", "abba.server.mcp"],
-      "env": {"ABBA_DB_PATH": "abba.duckdb"}
+      "command": "abba-mcp",
+      "env": {
+        "ABBA_DB_PATH": "abba.duckdb"
+      }
     }
   }
 }
 ```
 
-MCP is the standard but it's fragile in practice -- stdio transport loses state on crash, reconnection isn't standardized, and most agent frameworks have incomplete support. The Python import and HTTP interfaces are production-stable fallbacks that provide the exact same tools.
+## Tool Categories
 
-## Tools (21)
+### Data
 
-### Data tools
-| Tool | Description |
-|------|-------------|
-| `query_games` | Games with filters (sport, date, team, status) |
-| `query_odds` | Current odds across sportsbooks |
-| `query_team_stats` | Team performance stats |
-| `query_goaltender_stats` | NHL goaltender stats (Sv%, GAA, GSAA, xGSAA) |
-| `query_advanced_stats` | NHL advanced stats (Corsi, Fenwick, xG, PDO) |
-| `query_cap_data` | Salary cap analysis (space, dead cap, top earners) |
-| `query_roster` | Team roster with line combinations and injuries |
-| `list_sources` | Available data tables and row counts |
-| `describe_dataset` | Column schema for a table |
-| `refresh_data` | Pull fresh data from live APIs (NHL, MLB, Odds) |
+- `query_games`
+- `query_odds`
+- `query_team_stats`
+- `query_goaltender_stats`
+- `query_advanced_stats`
+- `query_cap_data`
+- `query_roster`
+- `list_sources`
+- `describe_dataset`
+- `refresh_data`
 
-### Analytics tools
-| Tool | Description |
-|------|-------------|
-| `predict_game` | Ensemble prediction (4 models, home win probability) |
-| `nhl_predict_game` | NHL-specific prediction (6 models: Corsi, xG, goaltender, special teams, rest) |
-| `explain_prediction` | Feature importance breakdown |
-| `graph_analysis` | Team network metrics (centrality, cohesion) |
-| `season_review` | Comprehensive NHL season review with analytics grades |
-| `playoff_odds` | Playoff probability via Monte Carlo simulation |
+### Prediction and analysis
 
-### Market tools
-| Tool | Description |
-|------|-------------|
-| `find_value` | Scan for +EV opportunities |
-| `compare_odds` | Cross-sportsbook line comparison |
-| `calculate_ev` | Expected value for a specific bet |
-| `kelly_sizing` | Optimal position size (half-Kelly, capped) |
-| `session_budget` | Remaining compute budget |
+- `predict_game`
+- `nhl_predict_game`
+- `explain_prediction`
+- `graph_analysis`
+- `season_review`
+- `playoff_odds`
 
-## Live data sources
+### Market and session
 
-ABBA pulls from real APIs -- no hardcoded data in production:
+- `find_value`
+- `compare_odds`
+- `calculate_ev`
+- `kelly_sizing`
+- `session_budget`
 
-| Source | Auth | Data | Freshness |
-|--------|------|------|-----------|
-| NHL Stats API (`api-web.nhle.com`) | None (free) | Standings, schedule, rosters | Real-time |
-| MLB Stats API (`statsapi.mlb.com`) | None (free) | Standings, schedule, rosters | Real-time |
-| The Odds API | `ODDS_API_KEY` env var | Live odds from 20+ sportsbooks | 30 seconds |
-| OpenWeather | `OPENWEATHER_API_KEY` env var | Game-day weather | Hourly |
+### Workflows
 
-```python
-# Pull fresh NHL data (free, no key needed)
-toolkit.refresh_data(source="nhl")
+- `run_workflow`
+- `list_workflows`
 
-# Pull live odds (needs API key)
-# export ODDS_API_KEY=your_key_here
-toolkit.refresh_data(source="odds")
-```
+## Current Scope
 
-Seed data is used for development and testing only -- deterministic (fixed random seed) for reproducible tests.
+The repo is strongest today as:
 
-## What the agent actually does
+- a local agent toolkit
+- an NHL-oriented demo and experimentation surface
+- a testbed for prediction, workflow, and trust-contract checks
 
-```
-Agent: "How are the Rangers doing? Any good bets tonight?"
+The repository also contains experimental and legacy modules outside the main toolkit path. If you are new to the codebase, start with:
 
-1. calls refresh_data(source="nhl", team="NYR")    -> pulls live standings + roster
-2. calls season_review(team_id="NYR")              -> 24-30-8, 56 pts, analytics grades
-3. calls query_goaltender_stats(team="NYR")        -> Shesterkin .918 Sv%, 12.5 GSAA
-4. calls query_games(sport="NHL", status="scheduled") -> tonight's games
-5. calls nhl_predict_game(game_id="nhl-...")        -> 58% home win (6 models)
-6. calls find_value(sport="NHL")                    -> 2 +EV opportunities
-7. calls kelly_sizing(prob=0.58, odds=2.10)         -> recommends $320 (half-Kelly)
-```
+- `src/abba/server/toolkit.py`
+- `src/abba/server/tools/`
+- `src/abba/engine/`
+- `src/abba/storage/duckdb.py`
+- `src/abba/workflows/engine.py`
 
-Seven tool calls. Each returns structured JSON with freshness metadata. No hallucinated records.
+## Live Data Notes
 
-## NHL analytics depth
+The active live-refresh path currently covers:
 
-The NHL engine (`engine/hockey.py`) provides comprehensive hockey analytics:
+- NHL standings and schedule
+- NHL rosters and goalie stats
+- optional odds ingestion when `ODDS_API_KEY` is set
 
-**Shot metrics**: Corsi (all shot attempts at 5v5), Fenwick (unblocked attempts). CF%, CA%, per-60 rates, relative to league average.
+Development and tests also rely on deterministic seed data.
 
-**Expected goals (xG)**: Calibrated logistic model using distance, angle, shot type, rebounds, rush chances, and game strength. Shot type multipliers: tip (1.4x), snap (1.05x), slap (0.85x), backhand (0.75x), wrap (0.45x). Rebounds are 2.5x base xG.
+## Development
 
-**Goaltender model**: Sv%, GAA, GSAA (goals saved above average vs league 0.907), xGSAA (actual vs expected goals), quality start percentage. Goaltender matchup comparison for game prediction.
+### Run tests
 
-**Special teams**: PP% and PK% with shot quality metrics (xG per opportunity, conversion rate). Combined special teams index weighted 45/55 PP/PK.
-
-**Rest and schedule**: Back-to-back detection (~4.5% win probability penalty), travel distance penalty, schedule density, rest days bonus. Net rest edge factor feeds into prediction.
-
-**Score-state adjusted stats**: Corsi adjusted for game state using McCurdy method. Leading CF x1.10/CA x0.90, trailing CF x0.90/CA x1.10, tied unadjusted.
-
-**Season review**: Record, points pace, Pythagorean wins (luck factor), analytics grades (Corsi + xG), special teams grade, goaltending grade.
-
-**Playoff probability**: Monte Carlo simulation (10K runs) from current points pace. Division and wildcard cutlines, points needed, win rate required.
-
-**Salary cap analysis**: Total cap hit, effective space (LTIR relief), position spending breakdown, top-5 earner concentration, expiring contracts, dead cap, cap health rating.
-
-**NHL prediction model**: 6 models combined via inverse-variance weighting:
-1. Points percentage log5 + home ice
-2. Pythagorean expectation (goal differential)
-3. Corsi-driven (possession proxy)
-4. xG-driven (shot quality)
-5. Goaltender matchup
-6. Combined with special teams + rest adjustments
-
-## Architecture
-
-```
-Agent (Claude / GPT / LangGraph / custom)
-    |
-    |-- Python SDK ---- ABBAToolkit ----+
-    |-- HTTP REST ----- /tools/call ----+
-    +-- MCP stdio ----- JSON-RPC -------+
-                                        |
-                              +---------v---------+
-                              |   Tool Dispatch    |
-                              |   (21 tools)       |
-                              +--------+-----------+
-                                       |
-                    +------------------+------------------+
-                    v                  v                  v
-              +----------+     +------------+     +-----------+
-              |  Engine   |     |  Storage   |     | Connectors |
-              |          |     |  (DuckDB)  |     | (live data) |
-              | Ensemble  |     |  games     |     | NHL API    |
-              | Features  |     |  odds      |     | MLB API    |
-              | Hockey    |     |  stats     |     | Odds API   |
-              | Kelly     |     |  goalies   |     | Weather    |
-              | Value     |     |  advanced  |     |            |
-              | Graph     |     |  cap/roster|     |            |
-              +----------+     +------------+     +-----------+
-```
-
-## Local development
+From the repo root:
 
 ```bash
-git clone https://github.com/paxtonedgar/ABBA.git
-cd ABBA/Projects/ABBA
-pip install -e ".[dev]"
-pytest  # 131 tests
+pytest
 ```
+
+For a focused local pass:
 
 ```bash
-# Start HTTP server
-python -m abba.server.http
-
-# Or use directly
-python -c "
-from abba import ABBAToolkit
-tk = ABBAToolkit()
-tk.refresh_data(source='nhl', team='NYR')
-print(tk.season_review(team_id='NYR'))
-"
+pytest tests/test_storage.py tests/test_engine.py tests/test_toolkit.py
 ```
 
-## Project structure
+### Repo layout
 
+```text
+src/abba/server/      Public toolkit interfaces
+src/abba/engine/      Prediction, EV, Kelly, graph, and NHL logic
+src/abba/storage/     DuckDB-backed persistence
+src/abba/workflows/   Multi-step workflow orchestration
+src/abba/connectors/  Seed and live data ingestion
+tests/                Unit, integration, and contract-style checks
+docs/                 Project notes, plans, and audit material
 ```
-Projects/ABBA/
-  src/abba/
-    server/           # tool interfaces
-      toolkit.py      # ABBAToolkit (main entry point, 21 tools)
-      mcp.py          # MCP stdio server
-      http.py         # HTTP REST server
-    engine/           # analytics compute
-      ensemble.py     # inverse-variance weighted model combining
-      features.py     # feature engineering (log5, pythagorean, weather)
-      hockey.py       # NHL analytics (Corsi, xG, goaltender, cap, playoffs)
-      kelly.py        # Kelly Criterion position sizing
-      value.py        # expected value scanning
-      graph.py        # team network analysis (scipy)
-    storage/
-      duckdb.py       # embedded columnar store (12 tables)
-    connectors/
-      seed.py         # deterministic sample data (dev/test)
-      live.py         # live API connectors (NHL, MLB, Odds)
-  tests/
-    test_engine.py    # math correctness (33 tests)
-    test_hockey.py    # NHL analytics math (50 tests)
-    test_storage.py   # DuckDB operations (11 tests)
-    test_toolkit.py   # integration + agent workflow (27 tests)
-    test_mcp.py       # protocol + SDK (10 tests)
-  pyproject.toml
-```
+
+## Documentation
+
+Start with:
+
+- `docs/README.md`
+- `docs/architecture-dossier.md`
+
+Not every document in `docs/` is canonical. Some are historical planning notes or audit artifacts.
 
 ## License
 

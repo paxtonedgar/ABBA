@@ -50,6 +50,7 @@ python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow",
     "integration: marks tests as integration tests",
+    "contract: trust-blocker contract tests — must pass before deployment",
 ]
 
 [tool.ruff]

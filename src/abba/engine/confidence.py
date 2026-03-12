@@ -28,7 +28,9 @@ LLM_INTERPRETATION_GUIDE: dict[str, str] = {
     ),
     "confidence_interval": (
         "Always mention the confidence interval, not just the point estimate. "
-        "For example, say '55% (80% CI: 42%-68%)' instead of just '55%'."
+        "For example, say '55% (80% CI: 42%-68%)' instead of just '55%'. "
+        "NOTE: These intervals are UNCALIBRATED estimates based on heuristic "
+        "width adjustments, not empirically validated coverage probabilities."
     ),
     "stale_data": (
         "If data is stale (more than 24 hours old), say so. Stale data means "
@@ -58,22 +60,23 @@ LLM_INTERPRETATION_GUIDE: dict[str, str] = {
 # Historical calibration baselines
 # ---------------------------------------------------------------------------
 
-# These represent the model's known calibration performance from backtesting.
-# They are used to compute confidence intervals and reliability grades.
-# In production these would be loaded from a calibration artifact; here we
-# hardcode conservative estimates from internal backtests.
+# These are ESTIMATED baselines, NOT empirically validated.
+# They are placeholders used to compute confidence intervals until a
+# leakage-free backtest produces real calibration data. The values below
+# are conservative guesses — treat any grade above C as aspirational
+# until replaced with a calibration artifact.
 _DEFAULT_ACCURACY_HISTORY: dict[str, Any] = {
     "log_loss": 0.68,
     "brier_score": 0.24,
     "accuracy": 0.57,
     "sample_size": 820,
     "date_range": "2023-10-01 to 2024-04-30",
+    "calibration_status": "estimated_not_validated",
 }
 
-# Calibration error: how far off the model's probability estimates tend to be.
-# Used to widen confidence intervals. Derived from reliability diagrams on
-# the backtest set. 0.08 means "on average, when we say 60% we're really
-# somewhere in [52%, 68%]".
+# Calibration error is an ESTIMATE, not measured from reliability
+# diagrams. Real calibration requires a hold-out set with no leakage.
+# 0.08 is a conservative guess; actual error may be larger.
 _BASE_CALIBRATION_ERROR: float = 0.08
 
 
@@ -251,6 +254,7 @@ def _compute_confidence_interval(
         "lower": round(lower, 4),
         "upper": round(upper, 4),
         "width": round(upper - lower, 4),
+        "calibration_status": "uncalibrated_heuristic",
     }
 
 

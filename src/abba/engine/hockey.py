@@ -10,9 +10,12 @@ All formulas use real hockey analytics math -- not LLM guesses.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..types import OddsSnapshot, TeamStatsRecord
 from scipy import stats as scipy_stats
 
 
@@ -182,6 +185,8 @@ class HockeyAnalytics:
                 z += COEF_SH
 
             # Convert log-odds to probability (logistic function)
+            # Clamp z to prevent math.exp overflow on extreme inputs
+            z = max(-500, min(500, z))
             xg = 1.0 / (1.0 + math.exp(-z))
             total_xg += xg
 
@@ -634,6 +639,7 @@ class HockeyAnalytics:
         division_cutline: int = 90,
         wildcard_cutline: int = 95,
         opponent_win_probs: list[float] | None = None,
+        seed: int | None = None,
     ) -> dict[str, Any]:
         """Estimate playoff probability using points pace and Monte Carlo.
 
@@ -662,7 +668,7 @@ class HockeyAnalytics:
         win_rate = pts_per_game / 2.0  # convert pts/game to win-equivalent rate
         true_talent = 0.5 + (win_rate - 0.5) * (games_played / (games_played + 55))
 
-        rng = np.random.default_rng()  # fresh seed each call
+        rng = np.random.default_rng(seed)
         n_sims = 50000
 
         # Use opponent-specific probabilities if provided and valid
@@ -742,14 +748,14 @@ class HockeyAnalytics:
 
     def build_nhl_features(
         self,
-        home_stats: dict[str, Any],
-        away_stats: dict[str, Any],
+        home_stats: TeamStatsRecord | dict[str, Any],
+        away_stats: TeamStatsRecord | dict[str, Any],
         home_advanced: dict[str, Any] | None = None,
         away_advanced: dict[str, Any] | None = None,
         home_goalie: dict[str, Any] | None = None,
         away_goalie: dict[str, Any] | None = None,
         rest_info: dict[str, Any] | None = None,
-        odds_data: list[dict[str, Any]] | None = None,
+        odds_data: list[OddsSnapshot] | None = None,
     ) -> dict[str, float]:
         """Build comprehensive NHL feature vector for prediction.
 
@@ -927,8 +933,11 @@ class HockeyAnalytics:
 
         # Model 1: Points percentage log5 (standard head-to-head formula)
         # log5: P(A beats B) = (pA - pA*pB) / (pA + pB - 2*pA*pB)
-        denom = hp + ap - 2 * hp * ap
-        m1 = (hp - hp * ap) / denom if abs(denom) > 1e-8 else 0.5
+        # Clamp inputs away from 0 and 1 to prevent singularity
+        hp_c = max(0.01, min(0.99, hp))
+        ap_c = max(0.01, min(0.99, ap))
+        denom = hp_c + ap_c - 2 * hp_c * ap_c
+        m1 = (hp_c - hp_c * ap_c) / denom if abs(denom) > 1e-8 else 0.5
         m1 += home_boost
 
         # Model 2: Pythagorean expectation via log5
@@ -943,8 +952,10 @@ class HockeyAnalytics:
         # Regress Pythagorean estimates too
         h_pyth = self.regress_to_mean(h_pyth, 0.5, int(h_gp))
         a_pyth = self.regress_to_mean(a_pyth, 0.5, int(a_gp))
-        denom2 = h_pyth + a_pyth - 2 * h_pyth * a_pyth
-        m2 = (h_pyth - h_pyth * a_pyth) / denom2 if abs(denom2) > 1e-8 else 0.5
+        h_pyth_c = max(0.01, min(0.99, h_pyth))
+        a_pyth_c = max(0.01, min(0.99, a_pyth))
+        denom2 = h_pyth_c + a_pyth_c - 2 * h_pyth_c * a_pyth_c
+        m2 = (h_pyth_c - h_pyth_c * a_pyth_c) / denom2 if abs(denom2) > 1e-8 else 0.5
         m2 += home_boost
 
         # Model 3: Recent form (low weight — noisy, low predictive power)

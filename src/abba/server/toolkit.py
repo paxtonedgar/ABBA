@@ -31,7 +31,11 @@ from ..engine.features import FeatureEngine
 from ..engine.graph import GraphEngine
 from ..engine.hockey import HockeyAnalytics
 from ..engine.kelly import KellyEngine
+from ..engine.ml_model import NHLGameModel
 from ..engine.value import ValueEngine
+from ..services.data import DataService
+from ..services.market import MarketService
+from ..services.prediction import PredictionService
 from ..storage import Storage
 from .tools import (
     AnalyticsToolsMixin,
@@ -83,7 +87,26 @@ class ABBAToolkit(
         self.graph = GraphEngine()
         self.hockey = HockeyAnalytics()
         self.elo = EloRatings(k=4, home_advantage=50)
-        self._last_refresh_ts: float | None = None
+        self.ml_model = NHLGameModel()
+        # Recover persisted refresh timestamp from DB (survives restarts)
+        self._last_refresh_ts: float | None = self.storage.get_last_refresh("team_stats")
+
+        # --- Services ---
+        self.prediction = PredictionService(
+            storage=self.storage,
+            hockey=self.hockey,
+            ensemble=self.ensemble,
+            features=self.features,
+            elo=self.elo,
+            ml_model=self.ml_model,
+        )
+        self.data_service = DataService(self.storage)
+        # MarketService.predict_fn wired after init (needs self reference)
+        self.market = MarketService(
+            storage=self.storage,
+            value=self.value,
+            kelly=self.kelly,
+        )
 
         # Create default session
         self._session_id = "default"
@@ -98,6 +121,13 @@ class ABBAToolkit(
         # Initialize Elo ratings from completed games
         self._init_elo()
 
+        # Train ML model on completed games (fast — <1s on startup)
+        self._init_ml_model()
+
+        # Wire cross-service dependencies now that toolkit is fully initialized
+        self.market._predict_fn = lambda gid: self.predict_game(gid)
+        self.market._nhl_predict_fn = lambda gid: self.nhl_predict_game(gid)
+
     def _init_elo(self) -> None:
         """Initialize Elo ratings from completed NHL games in storage."""
         completed = self.storage.query_games(sport="NHL", status="final", limit=500)
@@ -105,6 +135,26 @@ class ABBAToolkit(
             return
         games = sorted(completed, key=lambda g: g.get("date", ""))
         self.elo.initialize_from_games(games)
+
+    def _init_ml_model(self) -> None:
+        """Train GradientBoosting model on completed NHL games in storage."""
+        completed = self.storage.query_games(sport="NHL", status="final", limit=500)
+        if not completed:
+            return
+
+        # Build team stats lookup from current data
+        all_stats = self.storage.query_team_stats(sport="NHL")
+        stats_by_team: dict[str, dict] = {}
+        for row in all_stats:
+            tid = row.get("team_id", "")
+            stats = row.get("stats", {})
+            if isinstance(stats, dict) and tid:
+                stats_by_team[tid] = stats
+
+        if not stats_by_team:
+            return
+
+        self.ml_model.train(completed, stats_by_team)
 
     def _track(self, tool_name: str, params: dict, result: dict, start: float) -> dict:
         """Track tool call for observability."""
@@ -190,4 +240,7 @@ class ABBAToolkit(
             types.append("market_implied")
         if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
             types.append("elo")
+        # Pad with gradient_boosting if ML model added an extra prediction
+        while len(types) < len(model_preds):
+            types.append("gradient_boosting")
         return types[:len(model_preds)]

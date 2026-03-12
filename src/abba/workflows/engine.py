@@ -50,17 +50,15 @@ class WorkflowEngine:
             "params": params,
         }
 
-        # Attach confidence metadata if the workflow produced prediction data
+        # Attach confidence metadata from the weakest-link in the workflow.
+        # Single-game workflows: use the prediction's own confidence metadata.
+        # Multi-step workflows: build from inferred data sources.
         if "_confidence" not in result:
-            # Infer data sources from what was used
-            data_sources = []
-            confidence_from_pred = result.get("prediction", {}).get("confidence")
-            if confidence_from_pred:
-                # Single-game prediction workflows carry forward the prediction's confidence
+            # Check if a sub-step already produced confidence metadata
+            confidence_from_pred = result.get("confidence")  # from nhl_predict_game
+            if isinstance(confidence_from_pred, dict) and "reliability_grade" in confidence_from_pred:
                 result["_confidence"] = confidence_from_pred
             else:
-                # Multi-step workflows: build from weakest link
-                # Check if any sub-result has seed/live indicators
                 has_goalie = any(
                     k in result for k in ("home_goaltender", "goaltending", "goalie1")
                 )
@@ -80,11 +78,12 @@ class WorkflowEngine:
         """Infer which data sources were used from workflow result structure."""
         sources: list[str] = []
         # Check nested prediction confidence for source hints
-        conf = result.get("prediction", {})
-        if isinstance(conf, dict):
-            if conf.get("confidence", {}).get("data_freshness") == "seed":
+        # Check top-level confidence metadata (dict), not prediction.confidence (float)
+        conf_meta = result.get("confidence", {})
+        if isinstance(conf_meta, dict):
+            if conf_meta.get("data_freshness") == "seed":
                 sources.append("seed")
-            elif conf.get("confidence", {}).get("reliability_grade") in ("A", "B", "C"):
+            elif conf_meta.get("reliability_grade") in ("A", "B", "C"):
                 sources.append("live")
         if not sources:
             sources.append("seed")  # conservative default
@@ -195,7 +194,9 @@ class WorkflowEngine:
             "sizing": kelly_result,
         }
 
-        # Key factors narrative
+        # Key factors narrative — only mention factors the model actually used
+        # (skip features that were defaulted to neutral values)
+        defaulted = set(prediction.get("defaulted_features") or [])
         factors = []
         if pred_value > 0.55:
             factors.append(f"{home} favored at {pred_value:.0%}")
@@ -204,15 +205,17 @@ class WorkflowEngine:
         else:
             factors.append("Toss-up game")
 
-        if home_starter and home_starter.get("save_pct", 0) > 0.920:
-            factors.append(f"Elite goaltending: {home_starter['name']} ({home_starter['save_pct']:.3f} Sv%)")
-        if away_starter and away_starter.get("save_pct", 0) > 0.920:
-            factors.append(f"Elite goaltending: {away_starter['name']} ({away_starter['save_pct']:.3f} Sv%)")
+        if "goaltender_edge" not in defaulted:
+            if home_starter and home_starter.get("save_pct", 0) > 0.920:
+                factors.append(f"Elite goaltending: {home_starter['name']} ({home_starter['save_pct']:.3f} Sv%)")
+            if away_starter and away_starter.get("save_pct", 0) > 0.920:
+                factors.append(f"Elite goaltending: {away_starter['name']} ({away_starter['save_pct']:.3f} Sv%)")
 
-        if rest_info.get("home_b2b"):
-            factors.append(f"{home} on a back-to-back (fatigue penalty)")
-        if rest_info.get("away_b2b"):
-            factors.append(f"{away} on a back-to-back (fatigue penalty)")
+        if "rest_edge" not in defaulted:
+            if rest_info.get("home_b2b"):
+                factors.append(f"{home} on a back-to-back (fatigue penalty)")
+            if rest_info.get("away_b2b"):
+                factors.append(f"{away} on a back-to-back (fatigue penalty)")
 
         if h2h["games_played"] > 0:
             factors.append(
@@ -222,6 +225,9 @@ class WorkflowEngine:
 
         if ev_result and ev_result.get("is_positive_ev"):
             factors.append(f"+EV opportunity: {ev_result['expected_value']:.1%} edge")
+
+        if defaulted:
+            factors.append(f"Note: {len(defaulted)} features defaulted (not measured): {', '.join(sorted(defaulted))}")
 
         narrative["key_factors"] = factors
         return narrative

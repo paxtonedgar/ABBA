@@ -92,12 +92,16 @@ class NHLLiveConnector:
         teams_to_fetch: set[str] = set()
         if team:
             teams_to_fetch.add(team.upper())
-        # Auto-fetch for all teams with games on the schedule (not just today —
-        # the schedule endpoint returns ~a week of games)
+        # Auto-fetch for all teams with games on the schedule
         scheduled_games = storage.query_games(sport="NHL", status="scheduled", limit=200)
         for g in scheduled_games:
             teams_to_fetch.add(g["home_team"])
             teams_to_fetch.add(g["away_team"])
+
+        # Cold-start guard — if no scheduled games yet (first refresh),
+        # fetch all 32 NHL teams so goalie/roster data is never empty
+        if not teams_to_fetch:
+            teams_to_fetch = set(self.TEAMS.keys())
 
         # 4. Fetch rosters and goaltender stats for those teams
         if teams_to_fetch:
@@ -248,7 +252,8 @@ class NHLLiveConnector:
 
         goalies = data.get("goalies", [])
         if not goalies:
-            return {"status": "ok", "goalies_stored": 0, "note": "no goalie data in response"}
+            # Flag empty goalie response as warning, not success
+            return {"status": "warning", "goalies_stored": 0, "warning": f"NHL API returned no goalie data for {team}"}
 
         goalie_stats = []
         for g in goalies:
@@ -260,6 +265,16 @@ class NHLLiveConnector:
             toi_seconds = g.get("timeOnIce", 0)
             toi_minutes = toi_seconds / 60.0 if toi_seconds else 0
 
+            # Compute derived fields the model requires
+            goals_against = g.get("goalsAgainst", 0)
+            saves = g.get("saves", 0)
+            shots_against = g.get("shotsAgainst", 0)
+            save_pct = round(g.get("savePercentage", 0), 4)
+            gaa = round(g.get("goalsAgainstAverage", 0), 2)
+            # GSAA = (shots_against * league_avg_sv_pct) - goals_against
+            gsaa = round(shots_against * 0.907 - goals_against, 2) if shots_against > 0 else 0.0
+            games_started = g.get("gamesStarted", 0)
+
             goalie_stats.append({
                 "goaltender_id": pid,
                 "team": team,
@@ -267,19 +282,32 @@ class NHLLiveConnector:
                 "stats": {
                     "name": f"{first} {last}",
                     "games_played": gp,
-                    "games_started": g.get("gamesStarted", 0),
+                    "games_started": games_started,
                     "wins": g.get("wins", 0),
                     "losses": g.get("losses", 0),
                     "ot_losses": g.get("overtimeLosses", 0),
-                    "save_percentage": round(g.get("savePercentage", 0), 4),
-                    "goals_against_average": round(g.get("goalsAgainstAverage", 0), 2),
-                    "goals_against": g.get("goalsAgainst", 0),
-                    "saves": g.get("saves", 0),
-                    "shots_against": g.get("shotsAgainst", 0),
+                    # Model-compatible keys (save_pct not save_percentage)
+                    "save_pct": save_pct,
+                    "gaa": gaa,
+                    "gsaa": gsaa,
+                    # Keep originals for transparency
+                    "save_percentage": save_pct,
+                    "goals_against_average": gaa,
+                    "goals_against": goals_against,
+                    "saves": saves,
+                    "shots_against": shots_against,
                     "shutouts": g.get("shutouts", 0),
                     "time_on_ice_minutes": round(toi_minutes, 1),
                 },
             })
+
+        # Infer role from games_started — goalie with most starts is "starter"
+        if goalie_stats:
+            max_gs = max(g["stats"].get("games_started", 0) for g in goalie_stats)
+            for g in goalie_stats:
+                if g["stats"].get("games_started", 0) == max_gs and max_gs > 0:
+                    g["stats"]["role"] = "starter"
+                    break  # only tag one starter
 
         stored = storage.upsert_goaltender_stats(goalie_stats)
         return {"status": "ok", "goalies_stored": stored, "team": team}
@@ -294,6 +322,29 @@ class OddsLiveConnector:
     """
 
     BASE_URL = "https://api.the-odds-api.com/v4"
+
+    # Map The Odds API full team names → NHL 3-letter abbreviations.
+    # Used to resolve game_id by matching against stored schedule.
+    _ODDS_NAME_TO_ABBREV: dict[str, str] = {
+        "Anaheim Ducks": "ANA", "Arizona Coyotes": "ARI", "Utah Hockey Club": "UTA",
+        "Boston Bruins": "BOS", "Buffalo Sabres": "BUF",
+        "Calgary Flames": "CGY", "Carolina Hurricanes": "CAR",
+        "Chicago Blackhawks": "CHI", "Colorado Avalanche": "COL",
+        "Columbus Blue Jackets": "CBJ", "Dallas Stars": "DAL",
+        "Detroit Red Wings": "DET", "Edmonton Oilers": "EDM",
+        "Florida Panthers": "FLA", "Los Angeles Kings": "LAK",
+        "Minnesota Wild": "MIN", "Montreal Canadiens": "MTL",
+        "Montréal Canadiens": "MTL",
+        "Nashville Predators": "NSH", "New Jersey Devils": "NJD",
+        "New York Islanders": "NYI", "New York Rangers": "NYR",
+        "Ottawa Senators": "OTT", "Philadelphia Flyers": "PHI",
+        "Pittsburgh Penguins": "PIT", "San Jose Sharks": "SJS",
+        "Seattle Kraken": "SEA", "St Louis Blues": "STL",
+        "St. Louis Blues": "STL",
+        "Tampa Bay Lightning": "TBL", "Toronto Maple Leafs": "TOR",
+        "Vancouver Canucks": "VAN", "Vegas Golden Knights": "VGK",
+        "Washington Capitals": "WSH", "Winnipeg Jets": "WPG",
+    }
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ.get("ODDS_API_KEY", "")
@@ -322,11 +373,30 @@ class OddsLiveConnector:
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
             return {"status": "failed", "error": str(e)}
 
+        # Build lookup from (home_abbrev, away_abbrev, date) → game_id
+        # so we can resolve odds events to schedule game_ids.
+        schedule_games = storage.query_games(sport="NHL", status="scheduled")
+        schedule_lookup: dict[tuple[str, str, str], str] = {}
+        for g in schedule_games:
+            gdate = str(g.get("date", ""))[:10]
+            schedule_lookup[(g.get("home_team", ""), g.get("away_team", ""), gdate)] = g["game_id"]
+
         odds_records = []
+        resolved_count = 0
         for event in data:
             home_team = event.get("home_team", "")
             away_team = event.get("away_team", "")
-            game_id = f"nhl-{event.get('id', '')}"
+
+            # Resolve game_id via schedule match instead of using Odds API's own id
+            home_abbrev = self._ODDS_NAME_TO_ABBREV.get(home_team, "")
+            away_abbrev = self._ODDS_NAME_TO_ABBREV.get(away_team, "")
+            commence = event.get("commence_time", "")[:10]  # ISO date portion
+            game_id = schedule_lookup.get((home_abbrev, away_abbrev, commence))
+            if game_id:
+                resolved_count += 1
+            else:
+                # Fallback: use Odds API id (won't join to schedule, but data isn't lost)
+                game_id = f"odds-{event.get('id', '')}"
 
             for bookmaker in event.get("bookmakers", []):
                 book_name = bookmaker.get("title", "unknown")
@@ -365,6 +435,8 @@ class OddsLiveConnector:
             "status": "ok",
             "odds_stored": stored,
             "events": len(data),
+            "events_resolved": resolved_count,
+            "events_unresolved": len(data) - resolved_count,
             "requests_remaining": remaining,
         }
 
@@ -447,10 +519,22 @@ class MLBLiveConnector:
 
 def list_connectors() -> list[dict[str, Any]]:
     """List all available data connectors and their status."""
+    sr_key = bool(os.environ.get("SPORTRADAR_API_KEY"))
     odds_key = bool(os.environ.get("ODDS_API_KEY"))
     weather_key = bool(os.environ.get("OPENWEATHER_API_KEY"))
 
     return [
+        {
+            "name": "sportradar",
+            "sport": "NHL",
+            "provides": ["standings", "schedule", "goaltender_stats", "advanced_stats (Corsi, Fenwick, PDO)", "injuries"],
+            "auth": True,
+            "cost": "trial: 1000 req/mo",
+            "freshness": "real-time",
+            "status": "active" if sr_key else "needs SPORTRADAR_API_KEY env var",
+            "endpoint": "api.sportradar.com",
+            "note": "Comprehensive — replaces nhl_stats_api + moneypuck when active",
+        },
         {
             "name": "nhl_stats_api",
             "sport": "NHL",
@@ -458,8 +542,18 @@ def list_connectors() -> list[dict[str, Any]]:
             "auth": False,
             "cost": "free",
             "freshness": "real-time",
-            "status": "active",
+            "status": "active (fallback)" if sr_key else "active",
             "endpoint": "api-web.nhle.com",
+        },
+        {
+            "name": "moneypuck",
+            "sport": "NHL",
+            "provides": ["advanced_stats (Corsi, Fenwick, xG, PDO, shooting%)"],
+            "auth": False,
+            "cost": "free",
+            "freshness": "daily",
+            "status": "active",
+            "endpoint": "moneypuck.com",
         },
         {
             "name": "mlb_stats_api",

@@ -95,11 +95,12 @@ class EnsembleEngine:
     def _weighted_combine(
         self, preds: np.ndarray, weights: list[float] | None
     ) -> float:
-        """Inverse-variance weighting when no explicit weights given.
+        """Consensus-proximity weighting when no explicit weights given.
 
-        Models with predictions closer to the group mean get higher weight,
-        which is a simplified form of inverse-variance weighting that doesn't
-        require separate variance estimates per model.
+        Models with predictions closer to the group mean get higher weight.
+        This is NOT inverse-variance weighting (which requires per-model
+        variance estimates). It is agreement-based: outlier models are
+        down-weighted relative to the consensus.
         """
         if weights:
             w = np.array(weights, dtype=np.float64)
@@ -109,9 +110,15 @@ class EnsembleEngine:
         if len(preds) == 1:
             return float(preds[0])
 
-        # Inverse distance from mean as proxy for agreement-based weighting
+        # When models nearly agree (std < 0.02), consensus-proximity weighting
+        # becomes numerically unstable (tiny distances → huge weight ratios).
+        # Fall back to simple mean in that case.
         group_mean = float(np.mean(preds))
-        distances = np.abs(preds - group_mean) + 1e-8
+        std = float(np.std(preds))
+        if std < 0.02:
+            return group_mean
+
+        distances = np.abs(preds - group_mean) + 1e-4
         inv_weights = 1.0 / distances
         inv_weights = inv_weights / inv_weights.sum()
         return float(np.dot(preds, inv_weights))

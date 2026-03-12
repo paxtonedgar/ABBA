@@ -1,3 +1,3 @@
-from .duckdb import Storage
+from .duckdb import Storage, StorageValidationError
 
-__all__ = ["Storage"]
+__all__ = ["Storage", "StorageValidationError"]

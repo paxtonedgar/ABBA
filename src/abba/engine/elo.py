@@ -199,7 +199,9 @@ class EloRatings:
     @staticmethod
     def _win_probability(rating_a: float, rating_b: float) -> float:
         """P(A wins) = 1 / (1 + 10^((Rb - Ra) / 400))."""
-        return 1.0 / (1.0 + math.pow(10.0, (rating_b - rating_a) / 400.0))
+        # Clamp exponent to prevent overflow on extreme rating diffs
+        exponent = max(-10, min(10, (rating_b - rating_a) / 400.0))
+        return 1.0 / (1.0 + math.pow(10.0, exponent))
 
     @staticmethod
     def _margin_of_victory_multiplier(goal_diff: int, elo_diff: float) -> float:

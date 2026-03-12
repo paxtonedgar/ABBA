@@ -7,6 +7,7 @@ centrality measures to identify key players and team cohesion.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -128,10 +129,10 @@ class GraphEngine:
             sigma[s] = 1
             dist = np.full(n, -1)
             dist[s] = 0
-            queue = [s]
+            queue = deque([s])
 
             while queue:
-                v = queue.pop(0)
+                v = queue.popleft()
                 stack.append(v)
                 for w in range(n):
                     if binary[v][w] == 0:
