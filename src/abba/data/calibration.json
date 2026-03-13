@@ -1,0 +1,53 @@
+{
+  "log_loss": 0.6881,
+  "brier_score": 0.2475,
+  "accuracy": 0.5275,
+  "sample_size": 1037,
+  "temperature": 4.0894,
+  "ece": 0.0406,
+  "reliability_bins": [
+    {
+      "bin_low": 0.4,
+      "bin_high": 0.5,
+      "count": 167,
+      "predicted_mean": 0.4727,
+      "observed_frequency": 0.491,
+      "calibration_error": 0.0183
+    },
+    {
+      "bin_low": 0.5,
+      "bin_high": 0.6,
+      "count": 751,
+      "predicted_mean": 0.5483,
+      "observed_frequency": 0.506,
+      "calibration_error": 0.0423
+    },
+    {
+      "bin_low": 0.6,
+      "bin_high": 0.7,
+      "count": 118,
+      "predicted_mean": 0.6277,
+      "observed_frequency": 0.6864,
+      "calibration_error": 0.0588
+    },
+    {
+      "bin_low": 0.7,
+      "bin_high": 0.8,
+      "count": 1,
+      "predicted_mean": 0.7058,
+      "observed_frequency": 1.0,
+      "calibration_error": 0.2942
+    }
+  ],
+  "date_range": "2025-10-09 to 2026-03-11",
+  "model_version": "2.0.0",
+  "baselines": {
+    "coin_flip_log_loss": 0.6931,
+    "home_55_log_loss": 0.6932,
+    "elo_log_loss": 0.6918
+  },
+  "beats_coin_flip": true,
+  "beats_home_bias": true,
+  "beats_market": false,
+  "calibration_status": "empirically_validated"
+}
