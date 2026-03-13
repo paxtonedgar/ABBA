@@ -284,3 +284,70 @@ class CalibrationArtifact:
             "date_range": self.date_range,
             "calibration_status": status,
         }
+
+    def check_acceptance(
+        self,
+        max_log_loss: float = 0.6900,
+        max_brier: float = 0.2490,
+        max_ece: float = 0.060,
+        min_sample: int = 200,
+        must_beat_coin_flip: bool = True,
+        must_beat_home_bias: bool = True,
+    ) -> dict[str, Any]:
+        """Validate whether this model passes the acceptance gate.
+
+        Thresholds are derived from the current best backtest (Mar 2026):
+          log_loss=0.6844, brier=0.2457, ECE=0.0419, N=1037
+
+        A model change must not regress beyond these bounds. The defaults
+        include headroom (~0.005 log loss) so minor fluctuations don't
+        block deployment.
+
+        Returns dict with 'passed' bool and per-check results.
+        """
+        checks = {
+            "log_loss": {
+                "value": self.log_loss,
+                "threshold": max_log_loss,
+                "passed": self.log_loss <= max_log_loss,
+                "direction": "lower is better",
+            },
+            "brier_score": {
+                "value": self.brier_score,
+                "threshold": max_brier,
+                "passed": self.brier_score <= max_brier,
+                "direction": "lower is better",
+            },
+            "ece": {
+                "value": self.ece,
+                "threshold": max_ece,
+                "passed": self.ece <= max_ece,
+                "direction": "lower is better",
+            },
+            "sample_size": {
+                "value": self.sample_size,
+                "threshold": min_sample,
+                "passed": self.sample_size >= min_sample,
+                "direction": "higher is better",
+            },
+            "beats_coin_flip": {
+                "value": self.beats_coin_flip,
+                "threshold": must_beat_coin_flip,
+                "passed": self.beats_coin_flip or not must_beat_coin_flip,
+            },
+            "beats_home_bias": {
+                "value": self.beats_home_bias,
+                "threshold": must_beat_home_bias,
+                "passed": self.beats_home_bias or not must_beat_home_bias,
+            },
+        }
+
+        all_passed = all(c["passed"] for c in checks.values())
+        failures = [name for name, c in checks.items() if not c["passed"]]
+
+        return {
+            "passed": all_passed,
+            "checks": checks,
+            "failures": failures,
+            "summary": "ACCEPTED" if all_passed else f"REJECTED: {', '.join(failures)}",
+        }

@@ -254,3 +254,74 @@ class TestCalibrationArtifact:
         assert "calibration_status" in d
         assert "temperature" in d
         assert "baselines" in d
+
+
+# ---------------------------------------------------------------------------
+# Acceptance gate
+# ---------------------------------------------------------------------------
+
+class TestAcceptanceGate:
+    """Model changes must pass the acceptance gate before shipping."""
+
+    def test_good_model_passes(self):
+        artifact = CalibrationArtifact(
+            log_loss=0.6844, brier_score=0.2457, ece=0.042,
+            sample_size=1037, beats_coin_flip=True, beats_home_bias=True,
+        )
+        result = artifact.check_acceptance()
+        assert result["passed"], f"Good model should pass: {result['failures']}"
+
+    def test_coin_flip_model_fails(self):
+        artifact = CalibrationArtifact(
+            log_loss=0.6931, brier_score=0.25, ece=0.01,
+            sample_size=1000, beats_coin_flip=False, beats_home_bias=False,
+        )
+        result = artifact.check_acceptance()
+        assert not result["passed"]
+        assert "log_loss" in result["failures"]
+        assert "beats_coin_flip" in result["failures"]
+
+    def test_small_sample_fails(self):
+        artifact = CalibrationArtifact(
+            log_loss=0.65, brier_score=0.22, ece=0.03,
+            sample_size=50, beats_coin_flip=True, beats_home_bias=True,
+        )
+        result = artifact.check_acceptance()
+        assert not result["passed"]
+        assert "sample_size" in result["failures"]
+
+    def test_regression_log_loss_fails(self):
+        """A model that regresses on log loss should fail."""
+        artifact = CalibrationArtifact(
+            log_loss=0.6920, brier_score=0.2480, ece=0.05,
+            sample_size=500, beats_coin_flip=True, beats_home_bias=True,
+        )
+        result = artifact.check_acceptance()
+        assert not result["passed"]
+        assert "log_loss" in result["failures"]
+
+    def test_custom_thresholds(self):
+        """Thresholds should be overridable."""
+        artifact = CalibrationArtifact(
+            log_loss=0.6920, brier_score=0.2480, ece=0.05,
+            sample_size=500, beats_coin_flip=True, beats_home_bias=True,
+        )
+        # Relax log loss threshold
+        result = artifact.check_acceptance(max_log_loss=0.6950)
+        assert result["passed"]
+
+    def test_current_artifact_passes_gate(self):
+        """The shipped calibration artifact must pass the acceptance gate.
+
+        This is the CI canary — if this fails, something regressed.
+        """
+        path = Path(__file__).parent.parent / "src" / "abba" / "data" / "calibration.json"
+        if not path.exists():
+            pytest.skip("No calibration artifact yet")
+        artifact = CalibrationArtifact.load(path)
+        result = artifact.check_acceptance()
+        assert result["passed"], (
+            f"Shipped calibration artifact FAILS acceptance gate.\n"
+            f"Failures: {result['failures']}\n"
+            f"Checks: {json.dumps(result['checks'], indent=2, default=str)}"
+        )
