@@ -183,15 +183,14 @@ class PredictionService:
 
         Model order (from predict_nhl_game):
         1. points_log5
-        2. pythagorean_possession (Pythagorean + Corsi/xG adjustment)
-        3. situational (goal diff + special teams + rest)
-        4. goaltender_matchup
-        5. (optional) elo
-        6. (optional) market_implied
+        2. pythagorean_situational (Pythagorean + Corsi/xG + ST + rest)
+        3. goaltender_matchup
+        4. (optional) elo
+        5. (optional) market_implied
         + gradient_boosting (from ML model, appended by caller)
         """
-        types = ["points_log5", "pythagorean_possession",
-                 "situational", "goaltender_matchup"]
+        types = ["points_log5", "pythagorean_situational",
+                 "goaltender_matchup"]
         if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
             types.append("elo")
         market = features.get("market_implied_prob", 0)

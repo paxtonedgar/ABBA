@@ -895,21 +895,23 @@ class HockeyAnalytics:
     def predict_nhl_game(self, features: dict[str, float], elo_prob: float | None = None) -> list[float]:
         """Generate NHL-specific model predictions from features.
 
-        Models (reduced from 8 to eliminate pseudo-diversity):
+        Core models (3):
         1. Points percentage log5 + home ice (baseline)
-        2. Pythagorean + possession quality (goal-based, Corsi/xG-adjusted)
-        3. Goal differential + special teams + rest (situational)
-        4. Goaltender matchup model
-        5. (optional) Elo rating prediction
-        6. (optional) Market-implied probability (standalone, not blended)
+        2. Pythagorean + possession quality + situational adjustments
+           (goal-based, Corsi/xG-adjusted, plus special teams + rest)
+        3. Goaltender matchup model
 
-        Removed from prior version:
-        - Old M3 (recent form): low signal, correlated with M1
-        - Old M6 (composite average): circular — it was the average of other
-          models, so it always got highest weight via consensus-proximity
-          weighting. That's not a model, it's a mirror.
-        - Old M7 (market blend): market is now included as a standalone
-          signal, not blended with model average.
+        Optional models:
+        4. Elo rating prediction
+        5. Market-implied probability (standalone)
+
+        Removed:
+        - Old situational model (M3): log loss 0.7265 — worse than coin flip.
+          Goal diff signal is redundant with M1/M2. Special teams + rest
+          folded into M2 as adjustments.
+        - Old M3 (recent form): correlated with M1
+        - Old M6 (composite average): circular
+        - Old M7 (market blend): market now standalone
 
         All inputs are regressed to the mean based on games played.
         NHL game outcomes have ~58-62% max predictability.
@@ -974,18 +976,18 @@ class HockeyAnalytics:
         xgf_edge = (h_xgf - a_xgf)        # range: roughly -0.10 to +0.10
         # Weight: xG is more predictive than raw Corsi
         possession_adj = 0.15 * corsi_edge + 0.25 * xgf_edge
-        m2 = m2_base + possession_adj
+        # Fold special teams and rest into M2 as small adjustments
+        # (these were in the old M3 which had log_loss=0.7265 due to
+        # aggressive goal-diff coefficient; the signals themselves are real
+        # but should be secondary adjustments, not standalone predictions)
+        st_adj = ste * 0.10  # damped from 0.30 — ST effect is small per game
+        rest_adj = re * 0.5  # damped — rest effect is ~2-4% per game
+        m2 = m2_base + possession_adj + st_adj + rest_adj
 
-        # Model 3: Goal differential + special teams + rest (situational)
-        gd_diff = hgd - agd
-        m3_base = 0.5 + gd_diff * 0.16 + home_boost
-        st_adj = ste * 0.3
-        m3 = m3_base + st_adj + re
+        # Model 3: Goaltender matchup
+        m3 = 0.5 + ge + home_boost
 
-        # Model 4: Goaltender matchup
-        m4 = 0.5 + ge + home_boost
-
-        models = [float(np.clip(x, 0.01, 0.99)) for x in [m1, m2, m3, m4]]
+        models = [float(np.clip(x, 0.01, 0.99)) for x in [m1, m2, m3]]
 
         # Model 5 (optional): Elo rating prediction
         if elo_prob is not None and 0.01 <= elo_prob <= 0.99:

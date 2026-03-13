@@ -110,8 +110,8 @@ class TestWalkForwardBacktest:
     def test_individual_models_present(self, backtest):
         """Each result should have multiple individual model predictions."""
         for r in backtest.results:
-            assert len(r.individual_models) >= 4, \
-                f"Expected 4+ models, got {len(r.individual_models)} for {r.game_id}"
+            assert len(r.individual_models) >= 3, \
+                f"Expected 3+ models, got {len(r.individual_models)} for {r.game_id}"
 
     def test_results_chronological(self, backtest):
         """Results should be in chronological order."""

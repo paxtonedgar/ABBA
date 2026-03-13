@@ -258,13 +258,12 @@ class ABBAToolkit(
         features: dict[str, float],
     ) -> list[str]:
         """Build the list of model type labels matching predict_nhl_game output."""
-        types = ["points_log5", "pythagorean", "recent_form",
-                 "goal_differential", "goaltender_matchup", "combined_adjusted"]
+        types = ["points_log5", "pythagorean_situational", "goaltender_matchup"]
+        if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
+            types.append("elo")
         market = features.get("market_implied_prob", 0)
         if market > 0 and 0.15 <= market <= 0.85:
             types.append("market_implied")
-        if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
-            types.append("elo")
         # Pad with gradient_boosting if ML model added an extra prediction
         while len(types) < len(model_preds):
             types.append("gradient_boosting")

@@ -258,13 +258,12 @@ class TestStarterChangeAffectsOutput:
         features_weak = {**base_features, "goaltender_edge": -0.03}
         preds_weak = hockey.predict_nhl_game(features_weak)
 
-        # The goaltender matchup model (index 3) should differ
-        assert preds_elite[3] != preds_weak[3], (
+        # The goaltender matchup model (index 2) should differ
+        assert preds_elite[2] != preds_weak[2], (
             "Goaltender matchup model output must change when goaltender_edge changes"
         )
 
-        # The situational model (index 2) is not directly affected by goaltender_edge,
-        # but the overall ensemble average should differ
+        # The overall ensemble average should differ
         avg_elite = sum(preds_elite) / len(preds_elite)
         avg_weak = sum(preds_weak) / len(preds_weak)
         assert avg_elite != avg_weak, (

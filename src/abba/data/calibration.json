@@ -1,50 +1,34 @@
 {
-  "log_loss": 0.6838,
-  "brier_score": 0.2454,
-  "accuracy": 0.5342,
+  "log_loss": 0.6843,
+  "brier_score": 0.2456,
+  "accuracy": 0.5419,
   "sample_size": 1037,
-  "temperature": 2.0509,
-  "ece": 0.0443,
+  "temperature": 1.4435,
+  "ece": 0.0387,
   "reliability_bins": [
-    {
-      "bin_low": 0.3,
-      "bin_high": 0.4,
-      "count": 4,
-      "predicted_mean": 0.3883,
-      "observed_frequency": 0.25,
-      "calibration_error": 0.1383
-    },
     {
       "bin_low": 0.4,
       "bin_high": 0.5,
-      "count": 180,
-      "predicted_mean": 0.4702,
-      "observed_frequency": 0.4778,
-      "calibration_error": 0.0076
+      "count": 72,
+      "predicted_mean": 0.4803,
+      "observed_frequency": 0.375,
+      "calibration_error": 0.1053
     },
     {
       "bin_low": 0.5,
       "bin_high": 0.6,
-      "count": 703,
-      "predicted_mean": 0.549,
-      "observed_frequency": 0.5007,
-      "calibration_error": 0.0483
+      "count": 902,
+      "predicted_mean": 0.5488,
+      "observed_frequency": 0.5211,
+      "calibration_error": 0.0277
     },
     {
       "bin_low": 0.6,
       "bin_high": 0.7,
-      "count": 147,
-      "predicted_mean": 0.6311,
-      "observed_frequency": 0.6939,
-      "calibration_error": 0.0628
-    },
-    {
-      "bin_low": 0.7,
-      "bin_high": 0.8,
-      "count": 3,
-      "predicted_mean": 0.7217,
-      "observed_frequency": 1.0,
-      "calibration_error": 0.2783
+      "count": 63,
+      "predicted_mean": 0.6254,
+      "observed_frequency": 0.746,
+      "calibration_error": 0.1206
     }
   ],
   "date_range": "2025-10-09 to 2026-03-11",

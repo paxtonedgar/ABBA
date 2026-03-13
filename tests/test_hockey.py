@@ -493,7 +493,7 @@ class TestNHLPredictions:
             "goaltender_edge": 0.05, "home_st_edge": 0.05, "rest_edge": 0.02,
         }
         preds = hockey.predict_nhl_game(features)
-        assert len(preds) == 4  # points_log5, pythagorean_possession, situational, goaltender
+        assert len(preds) == 3  # points_log5, pythagorean_situational, goaltender
         for p in preds:
             assert 0.01 <= p <= 0.99
 
