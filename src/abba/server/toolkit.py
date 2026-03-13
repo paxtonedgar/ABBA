@@ -137,7 +137,7 @@ class ABBAToolkit(
         self.elo.initialize_from_games(games)
 
     def _init_ml_model(self) -> None:
-        """Train GradientBoosting model on completed NHL games in storage."""
+        """Train gradient boosting model on completed NHL games in storage."""
         completed = self.storage.query_games(sport="NHL", status="final", limit=500)
         if not completed:
             return
@@ -154,7 +154,32 @@ class ABBAToolkit(
         if not stats_by_team:
             return
 
-        self.ml_model.train(completed, stats_by_team)
+        # Build advanced stats lookup (Corsi/xG — no longer ghost features)
+        all_advanced = self.storage.query_nhl_advanced_stats()
+        adv_by_team: dict[str, dict] = {}
+        for row in all_advanced:
+            tid = row.get("team_id", "")
+            stats = row.get("stats", {})
+            if isinstance(stats, dict) and tid:
+                adv_by_team[tid] = stats
+
+        # Build goaltender stats lookup
+        all_goalies = self.storage.query_goaltender_stats()
+        goalie_by_team: dict[str, dict] = {}
+        for row in all_goalies:
+            team = row.get("team", "")
+            stats = row.get("stats", {})
+            if isinstance(stats, dict) and team:
+                # Keep the goalie with highest games played per team
+                existing = goalie_by_team.get(team, {})
+                if stats.get("games_played", 0) >= existing.get("games_played", 0):
+                    goalie_by_team[team] = stats
+
+        self.ml_model.train(
+            completed, stats_by_team,
+            advanced_stats=adv_by_team or None,
+            goaltender_stats=goalie_by_team or None,
+        )
 
     def _track(self, tool_name: str, params: dict, result: dict, start: float) -> dict:
         """Track tool call for observability."""

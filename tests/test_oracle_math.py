@@ -390,13 +390,13 @@ class TestConfidenceInterval:
     @pytest.mark.contract
     def test_ci_50gp_goalie_live(self):
         # min_gp=50, has_goalie=True, data_source="live"
-        # base half_width = 0.08
+        # base half_width = _BASE_CALIBRATION_ERROR (0.12 after honest recalibration)
         # sample_factor = sqrt(50/50) = 1.0, max(1.0, 1.0) = 1.0
         # no goalie penalty, no seed penalty
-        # half_width = 0.08 * 1.0 = 0.08
-        # ci_half = 0.08 * 1.28 = 0.1024
-        # point=0.55 => lower=0.55-0.1024=0.4476, upper=0.55+0.1024=0.6524
-        # width = 0.6524 - 0.4476 = 0.2048
+        # half_width = 0.12 * 1.0 = 0.12
+        # ci_half = 0.12 * 1.28 = 0.1536
+        # point=0.55 => lower=0.55-0.1536=0.3964, upper=0.55+0.1536=0.7036
+        # width = 0.7036 - 0.3964 = 0.3072
         ci = _compute_confidence_interval(
             prediction_value=0.55,
             calibration_error=_BASE_CALIBRATION_ERROR,
@@ -405,21 +405,21 @@ class TestConfidenceInterval:
             data_source="live",
         )
         assert abs(ci["point"] - 0.55) < TOL
-        assert abs(ci["width"] - 0.2048) < TOL
-        assert abs(ci["lower"] - 0.4476) < TOL
-        assert abs(ci["upper"] - 0.6524) < TOL
+        assert abs(ci["width"] - 0.3072) < TOL
+        assert abs(ci["lower"] - 0.3964) < TOL
+        assert abs(ci["upper"] - 0.7036) < TOL
 
     @pytest.mark.contract
     def test_ci_10gp_no_goalie_seed(self):
         # min_gp=10, has_goalie=False, data_source="seed"
-        # base half_width = 0.08
-        # sample_factor = sqrt(50/10) = sqrt(5) = 2.23607, max(2.23607, 1.0) = 2.23607
-        # half_width = 0.08 * 2.23607 = 0.17889
-        # no goalie: *= 1.25 => 0.22361
-        # seed: *= 2.0 => 0.44721
-        # ci_half = 0.44721 * 1.28 = 0.57243
-        # point=0.55 => lower = max(0.55 - 0.57243, 0) = 0.0
-        # upper = min(0.55 + 0.57243, 1.0) = 1.0
+        # base half_width = 0.12
+        # sample_factor = sqrt(50/10) = sqrt(5) = 2.23607
+        # half_width = 0.12 * 2.23607 = 0.26833
+        # no goalie: *= 1.25 => 0.33541
+        # seed: *= 2.0 => 0.67082
+        # ci_half = 0.67082 * 1.28 = 0.85865
+        # point=0.55 => lower = max(0.55 - 0.85865, 0) = 0.0
+        # upper = min(0.55 + 0.85865, 1.0) = 1.0
         # width = 1.0 - 0.0 = 1.0
         ci = _compute_confidence_interval(
             prediction_value=0.55,

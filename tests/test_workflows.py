@@ -86,6 +86,8 @@ class TestTonightsSlate:
             assert "home_win_prob" in game
             assert "pick" in game
             assert "confidence" in game
+            assert "confidence_grade" in game
+            assert "data_provenance" in game
             assert 0 <= game["home_win_prob"] <= 1
 
 
@@ -191,7 +193,7 @@ class TestGoaltenderDuel:
 
     def test_goalie_profile_fields(self, engine):
         result = engine.run("goaltender_duel", goalie1_team="NYR", goalie2_team="BOS")
-        for key in ("sv_pct", "gaa", "gsaa", "games"):
+        for key in ("sv_pct", "gaa", "gsaa", "games", "selection_method", "situational_splits"):
             assert key in result["goalie1"]
             assert key in result["goalie2"]
 
@@ -208,6 +210,8 @@ class TestTeamComparison:
         assert "team2" in result
         assert "categories" in result
         assert "category_wins" in result
+        assert "goaltending" in result
+        assert "roster_depth" in result
         assert result["team1"]["abbrev"] == "NYR"
         assert result["team2"]["abbrev"] == "BOS"
 
@@ -240,6 +244,13 @@ class TestValueScan:
         result = engine.run("value_scan", bankroll=5000.0)
         assert result["bankroll"] == 5000.0
 
+    def test_sized_bets_surface_review_metadata(self, engine):
+        result = engine.run("value_scan")
+        for bet in result["sized_bets"]:
+            assert "confidence_grade" in bet
+            assert "defaulted_features" in bet
+            assert "requires_manual_review" in bet
+
 
 class TestBettingStrategy:
     def test_strategy_structure(self, engine):
@@ -248,6 +259,7 @@ class TestBettingStrategy:
         assert "discipline_rules" in result
         assert "todays_plays" in result
         assert "play_count" in result
+        assert "manual_review_play_count" in result
         assert isinstance(result["discipline_rules"], list)
         assert len(result["discipline_rules"]) >= 4
 
@@ -274,6 +286,18 @@ class TestGamePrediction:
             assert "headline" in result
             assert "prediction" in result
             assert "key_factors" in result
+            assert "confidence" in result
+            assert "data_provenance" in result
+            assert "best_bet" in result
+            assert "context_notes" in result
+
+    def test_selected_goalie_matches_prediction_provenance(self, engine):
+        result = engine.run("game_prediction", team="NYR")
+        if "error" not in result:
+            home_goalie = result["data_provenance"]["home_goaltender"]["name"]
+            away_goalie = result["data_provenance"]["away_goaltender"]["name"]
+            assert result["home_team"]["starter"] == home_goalie
+            assert result["away_team"]["starter"] == away_goalie
 
 
 class TestConvenienceFunction:

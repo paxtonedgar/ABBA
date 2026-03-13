@@ -179,7 +179,7 @@ class TestNHLTools:
         game_id = games["games"][0]["game_id"]
         result = toolkit.nhl_predict_game(game_id)
         assert "prediction" in result
-        assert result["model_count"] >= 6  # 6 base + optional market-implied
+        assert result["model_count"] >= 4  # 4 base + optional elo/market/gradient_boosting
 
     def test_nhl_predict_wrong_sport(self, toolkit):
         games = toolkit.query_games(sport="MLB", status="scheduled")

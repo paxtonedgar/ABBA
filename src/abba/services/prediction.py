@@ -6,7 +6,6 @@ Can be tested without instantiating ABBAToolkit or any mixins.
 
 from __future__ import annotations
 
-import datetime as _dt
 from typing import Any
 
 from ..engine.confidence import build_prediction_meta
@@ -15,42 +14,9 @@ from ..engine.ensemble import EnsembleEngine
 from ..engine.features import FeatureEngine
 from ..engine.hockey import HockeyAnalytics
 from ..engine.ml_model import NHLGameModel
+from ..services.prediction_input import CURRENT_SEASON, build_nhl_prediction_input
 from ..storage import Storage
-
-
-# Required fields that must exist in goalie stats for the model to consume them.
-_REQUIRED_GOALIE_FIELDS = {"save_pct", "gaa", "gsaa"}
-
-# Current season — single source of truth
-CURRENT_SEASON = "2025-26"
-
-
-def _select_starter(goalies: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Deterministic starter selection: explicit role, then max games_started."""
-    if not goalies:
-        return None
-    for g in goalies:
-        stats = g.get("stats", {})
-        if stats.get("role") == "starter":
-            return stats
-    best = max(goalies, key=lambda g: g.get("stats", {}).get("games_started", 0))
-    return best.get("stats")
-
-
-def _validate_goalie_stats(
-    stats: dict[str, Any] | None, team: str
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Validate goalie stats have required fields."""
-    if stats is None:
-        return None, [f"No goalie data for {team}"]
-    missing = _REQUIRED_GOALIE_FIELDS - set(stats.keys())
-    if missing:
-        return None, [
-            f"Goalie data for {team} missing required fields: {missing}. "
-            f"Available keys: {set(stats.keys())}. "
-            f"Goaltender matchup model will be excluded."
-        ]
-    return stats, []
+from ..types import PredictionOutput
 
 
 class PredictionService:
@@ -92,116 +58,31 @@ class PredictionService:
             last_refresh_ts: Unix timestamp of last data refresh (for confidence).
             player_impact_fn: Callable(team) -> impact dict. If None, uses neutral defaults.
         """
+        prepared = build_nhl_prediction_input(
+            storage=self.storage,
+            hockey=self.hockey,
+            game_id=game_id,
+            last_refresh_ts=last_refresh_ts,
+            player_impact_fn=player_impact_fn,
+            season=CURRENT_SEASON,
+        )
+        if isinstance(prepared, dict):
+            return prepared
+
         game = self.storage.get_game_by_id(game_id)
         if not game:
             return {"error": f"game not found: {game_id}"}
 
-        if game.get("sport") != "NHL":
-            return {"error": "not an NHL game, use predict_game for other sports"}
-
-        home = game.get("home_team", "")
-        away = game.get("away_team", "")
-        season = CURRENT_SEASON
-        data_warnings: list[str] = []
-
-        # --- GUARD: Team stats are REQUIRED ---
-        home_stats_list = self.storage.query_team_stats(team_id=home, sport="NHL", season=season)
-        away_stats_list = self.storage.query_team_stats(team_id=away, sport="NHL", season=season)
-
-        missing_stats = []
-        if not home_stats_list:
-            missing_stats.append(home)
-        if not away_stats_list:
-            missing_stats.append(away)
-
-        if missing_stats:
-            return {
-                "error": "missing_team_stats",
-                "missing_teams": missing_stats,
-                "season": season,
-                "recommendation": "Call refresh_data(source='nhl') first to populate team stats.",
-            }
-
-        home_stats = home_stats_list[0]
-        away_stats = away_stats_list[0]
-
-        # --- GUARD: Season coherence ---
-        home_season = home_stats.get("season", season)
-        away_season = away_stats.get("season", season)
-        if home_season != season or away_season != season:
-            return {
-                "error": "season_mismatch",
-                "expected_season": season,
-                "home_stats_season": home_season,
-                "away_stats_season": away_season,
-                "recommendation": "Team stats are from the wrong season. Call refresh_data() to update.",
-            }
-
-        # Advanced stats OPTIONAL
-        home_adv_list = self.storage.query_nhl_advanced_stats(team_id=home, season=season)
-        away_adv_list = self.storage.query_nhl_advanced_stats(team_id=away, season=season)
-        home_adv = home_adv_list[0].get("stats", {}) if home_adv_list else None
-        away_adv = away_adv_list[0].get("stats", {}) if away_adv_list else None
-        if not home_adv or not away_adv:
-            data_warnings.append("Advanced stats (Corsi/xG) absent — features will use neutral defaults")
-
-        # --- GUARD: Goalie selection ---
-        home_goalies = self.storage.query_goaltender_stats(team=home, season=season)
-        away_goalies = self.storage.query_goaltender_stats(team=away, season=season)
-
-        raw_home_goalie = _select_starter(home_goalies)
-        raw_away_goalie = _select_starter(away_goalies)
-
-        home_goalie, home_goalie_warnings = _validate_goalie_stats(raw_home_goalie, home)
-        away_goalie, away_goalie_warnings = _validate_goalie_stats(raw_away_goalie, away)
-        data_warnings.extend(home_goalie_warnings)
-        data_warnings.extend(away_goalie_warnings)
-
-        # Player-level impact
-        if player_impact_fn:
-            home_player_impact = player_impact_fn(home)
-            away_player_impact = player_impact_fn(away)
-        else:
-            home_player_impact = {"injury_impact": 0.0, "top_scorer_available": 1.0, "roster_completeness": 1.0}
-            away_player_impact = {"injury_impact": 0.0, "top_scorer_available": 1.0, "roster_completeness": 1.0}
-
-        # --- GUARD: Odds join ---
-        game_odds = self.storage.query_odds(game_id=game_id, latest_only=True)
-        odds_status = "present" if game_odds else "absent"
-        if not game_odds:
-            data_warnings.append(
-                f"No odds data matched game_id={game_id}. "
-                "Market blend model excluded. Possible ID mismatch between schedule and odds providers."
-            )
-
-        # Build features
-        features = self.hockey.build_nhl_features(
-            home_stats, away_stats,
-            home_advanced=home_adv, away_advanced=away_adv,
-            home_goalie=home_goalie, away_goalie=away_goalie,
-            odds_data=game_odds,
-        )
-
-        # Track defaulted features
-        defaulted_features: list[str] = []
-        if not home_adv or not away_adv:
-            defaulted_features.extend(["home_corsi_pct", "away_corsi_pct",
-                                       "home_xgf_pct", "away_xgf_pct"])
-        if not home_goalie or not away_goalie:
-            defaulted_features.append("goaltender_edge")
-        defaulted_features.append("rest_edge")
-        if not game_odds:
-            defaulted_features.append("market_implied_prob")
-        if defaulted_features:
-            data_warnings.append(
-                f"Defaulted features (neutral values, not measured): {defaulted_features}"
-            )
-
-        # Add player-level features
-        features["home_injury_impact"] = home_player_impact["injury_impact"]
-        features["away_injury_impact"] = away_player_impact["injury_impact"]
-        features["home_roster_completeness"] = home_player_impact["roster_completeness"]
-        features["away_roster_completeness"] = away_player_impact["roster_completeness"]
+        home = prepared.prediction_input["home_team"]
+        away = prepared.prediction_input["away_team"]
+        season = prepared.prediction_input["season"]
+        features = dict(prepared.prediction_input["features"])
+        defaulted_features = list(prepared.prediction_input.get("defaulted_features", []))
+        data_warnings = list(prepared.data_warnings)
+        home_goalie = prepared.home_goalie
+        away_goalie = prepared.away_goalie
+        home_player_impact = prepared.home_player_impact
+        away_player_impact = prepared.away_player_impact
 
         # Elo
         elo_pred = self.elo.predict(home, away)
@@ -227,7 +108,7 @@ class PredictionService:
         prediction = self.ensemble.combine(model_preds, method=method)
 
         # Confidence metadata
-        data_source = home_stats.get("source", "unknown") if isinstance(home_stats, dict) else "unknown"
+        data_source = prepared.data_source
         has_goalie = home_goalie is not None and away_goalie is not None
 
         extra_caveats = list(data_warnings)
@@ -244,35 +125,7 @@ class PredictionService:
             extra_caveats=extra_caveats if extra_caveats else None,
         )
 
-        # Provenance
-        _now = _dt.datetime.now().isoformat()
-
-        def _as_of(val: Any) -> str:
-            if val is None:
-                return _now
-            return str(val) if not isinstance(val, str) else val
-
-        data_provenance = {
-            "home_team_stats": {"status": "present", "season": home_season, "source": home_stats.get("source", "unknown"), "as_of": _as_of(home_stats.get("updated_at"))},
-            "away_team_stats": {"status": "present", "season": away_season, "source": away_stats.get("source", "unknown"), "as_of": _as_of(away_stats.get("updated_at"))},
-            "home_advanced_stats": {"status": "present" if home_adv else "absent", "season": season, "as_of": _now},
-            "away_advanced_stats": {"status": "present" if away_adv else "absent", "season": season, "as_of": _now},
-            "home_goaltender": {
-                "status": "present" if home_goalie else "absent",
-                "name": home_goalie.get("name", "unknown") if home_goalie else None,
-                "selection_method": "role_tag" if (home_goalie and home_goalie.get("role")) else "max_games_started" if home_goalie else "none",
-                "season": season, "as_of": _now,
-            },
-            "away_goaltender": {
-                "status": "present" if away_goalie else "absent",
-                "name": away_goalie.get("name", "unknown") if away_goalie else None,
-                "selection_method": "role_tag" if (away_goalie and away_goalie.get("role")) else "max_games_started" if away_goalie else "none",
-                "season": season, "as_of": _now,
-            },
-            "odds": {"status": odds_status, "season": season, "books_matched": len(game_odds), "as_of": _now},
-        }
-
-        result = {
+        result: PredictionOutput = {
             "game_id": game_id,
             "home_team": home,
             "away_team": away,
@@ -295,7 +148,10 @@ class PredictionService:
             },
             "confidence": confidence_meta,
             "defaulted_features": defaulted_features if defaulted_features else None,
-            "data_provenance": data_provenance,
+            "data_provenance": prepared.data_provenance,
+            "prediction_input": prepared.prediction_input,
+            "model_features_used": sorted(prepared.prediction_input["features"].keys()),
+            "context_only": prepared.prediction_input.get("context_only", {}),
             "_cache_hit": False,
         }
 
@@ -308,14 +164,24 @@ class PredictionService:
         elo_prob: float | None,
         features: dict[str, float],
     ) -> list[str]:
-        """Build the list of model type labels matching predict_nhl_game output."""
-        types = ["points_log5", "pythagorean", "recent_form",
-                 "goal_differential", "goaltender_matchup", "combined_adjusted"]
+        """Build the list of model type labels matching predict_nhl_game output.
+
+        Model order (from predict_nhl_game):
+        1. points_log5
+        2. pythagorean_possession (Pythagorean + Corsi/xG adjustment)
+        3. situational (goal diff + special teams + rest)
+        4. goaltender_matchup
+        5. (optional) elo
+        6. (optional) market_implied
+        + gradient_boosting (from ML model, appended by caller)
+        """
+        types = ["points_log5", "pythagorean_possession",
+                 "situational", "goaltender_matchup"]
+        if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
+            types.append("elo")
         market = features.get("market_implied_prob", 0)
         if market > 0 and 0.15 <= market <= 0.85:
             types.append("market_implied")
-        if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
-            types.append("elo")
         while len(types) < len(model_preds):
             types.append("gradient_boosting")
         return types[:len(model_preds)]

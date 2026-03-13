@@ -84,6 +84,23 @@ class TestPredictionService:
         assert "features" in result
         assert result["sport"] == "NHL"
 
+    def test_predict_nhl_exposes_prediction_input_contract(self, prediction_service, db):
+        games = db.query_games(sport="NHL", status="scheduled")
+        if not games:
+            pytest.skip("No scheduled NHL games in seed data")
+
+        result = prediction_service.predict_nhl(games[0]["game_id"])
+        assert "error" not in result
+        assert "prediction_input" in result
+        assert "model_features_used" in result
+
+        prediction_input = result["prediction_input"]
+        assert "required_features" in prediction_input
+        assert "optional_features" in prediction_input
+        assert "provenance" in prediction_input
+        assert "team_stats" in prediction_input["provenance"]
+        assert "odds" in prediction_input["provenance"]
+
     def test_predict_nhl_missing_game(self, prediction_service):
         result = prediction_service.predict_nhl("nonexistent-game-id")
         assert "error" in result

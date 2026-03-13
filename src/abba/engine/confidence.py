@@ -5,16 +5,26 @@ HOW MUCH to trust the numbers so it doesn't launder uncertainty into false
 precision. This module attaches calibration metadata to every prediction
 and workflow response.
 
+Calibration data comes from two sources:
+1. CalibrationArtifact (preferred): empirically measured from walk-forward
+   backtest. Loaded from JSON artifact file if available.
+2. Fallback defaults: conservative estimates used before any backtest exists.
+   Clearly labeled as "uncalibrated" so the LLM knows not to overclaim.
+
 All computations use stdlib + numpy only (no additional dependencies).
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -28,9 +38,7 @@ LLM_INTERPRETATION_GUIDE: dict[str, str] = {
     ),
     "confidence_interval": (
         "Always mention the confidence interval, not just the point estimate. "
-        "For example, say '55% (80% CI: 42%-68%)' instead of just '55%'. "
-        "NOTE: These intervals are UNCALIBRATED estimates based on heuristic "
-        "width adjustments, not empirically validated coverage probabilities."
+        "For example, say '55% (80% CI: 42%-68%)' instead of just '55%'."
     ),
     "stale_data": (
         "If data is stale (more than 24 hours old), say so. Stale data means "
@@ -57,27 +65,63 @@ LLM_INTERPRETATION_GUIDE: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Calibration artifact loading
+# ---------------------------------------------------------------------------
+
+# Try to load empirically measured calibration from a backtest artifact.
+# Falls back to conservative defaults if no artifact exists.
+_CALIBRATION_ARTIFACT = None
+_CALIBRATION_ARTIFACT_PATH = Path(__file__).parent.parent / "data" / "calibration.json"
+
+
+def _load_calibration_artifact() -> Any | None:
+    """Load calibration artifact if it exists. Returns None otherwise."""
+    try:
+        if _CALIBRATION_ARTIFACT_PATH.exists():
+            from .calibration import CalibrationArtifact
+            artifact = CalibrationArtifact.load(_CALIBRATION_ARTIFACT_PATH)
+            if artifact.sample_size >= 50:
+                log.info("Loaded calibration artifact: %d games, ECE=%.4f",
+                         artifact.sample_size, artifact.ece)
+                return artifact
+            log.info("Calibration artifact has only %d games, using defaults", artifact.sample_size)
+    except Exception as e:
+        log.warning("Failed to load calibration artifact: %s", e)
+    return None
+
+
+def get_calibration_artifact() -> Any | None:
+    """Get the loaded calibration artifact, loading lazily if needed."""
+    global _CALIBRATION_ARTIFACT
+    if _CALIBRATION_ARTIFACT is None:
+        _CALIBRATION_ARTIFACT = _load_calibration_artifact()
+    return _CALIBRATION_ARTIFACT
+
+
+def set_calibration_artifact(artifact: Any) -> None:
+    """Inject a calibration artifact (e.g., from a fresh backtest run)."""
+    global _CALIBRATION_ARTIFACT
+    _CALIBRATION_ARTIFACT = artifact
+
+
+# ---------------------------------------------------------------------------
 # Historical calibration baselines
 # ---------------------------------------------------------------------------
 
-# These are ESTIMATED baselines, NOT empirically validated.
-# They are placeholders used to compute confidence intervals until a
-# leakage-free backtest produces real calibration data. The values below
-# are conservative guesses — treat any grade above C as aspirational
-# until replaced with a calibration artifact.
+# Fallback defaults when no calibration artifact exists.
+# CLEARLY LABELED as uncalibrated — the LLM interpretation guide references this.
 _DEFAULT_ACCURACY_HISTORY: dict[str, Any] = {
-    "log_loss": 0.68,
-    "brier_score": 0.24,
-    "accuracy": 0.57,
-    "sample_size": 820,
-    "date_range": "2023-10-01 to 2024-04-30",
-    "calibration_status": "estimated_not_validated",
+    "log_loss": 0.6931,      # ln(2) — coin flip, honest baseline
+    "brier_score": 0.25,     # coin flip baseline
+    "accuracy": 0.50,        # coin flip baseline
+    "sample_size": 0,
+    "date_range": "no_backtest_run",
+    "calibration_status": "uncalibrated_no_backtest",
 }
 
-# Calibration error is an ESTIMATE, not measured from reliability
-# diagrams. Real calibration requires a hold-out set with no leakage.
-# 0.08 is a conservative guess; actual error may be larger.
-_BASE_CALIBRATION_ERROR: float = 0.08
+# Fallback calibration error. Conservative (wide intervals) because
+# we don't know how calibrated the model is without a backtest.
+_BASE_CALIBRATION_ERROR: float = 0.12
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +293,18 @@ def _compute_confidence_interval(
     lower = max(prediction_value - ci_half, 0.0)
     upper = min(prediction_value + ci_half, 1.0)
 
+    artifact = get_calibration_artifact()
+    if artifact is not None and artifact.sample_size >= 50:
+        cal_status = "empirically_calibrated"
+    else:
+        cal_status = "uncalibrated_heuristic"
+
     return {
         "point": round(prediction_value, 4),
         "lower": round(lower, 4),
         "upper": round(upper, 4),
         "width": round(upper - lower, 4),
-        "calibration_status": "uncalibrated_heuristic",
+        "calibration_status": cal_status,
     }
 
 
@@ -302,8 +352,22 @@ def build_prediction_meta(
     """
     home_gp = int(features.get("home_games_played", 0))
     away_gp = int(features.get("away_games_played", 0))
-    cal_err = calibration_error if calibration_error is not None else _BASE_CALIBRATION_ERROR
-    acc_hist = accuracy_history if accuracy_history is not None else dict(_DEFAULT_ACCURACY_HISTORY)
+
+    # Try calibration artifact first, then explicit overrides, then defaults
+    artifact = get_calibration_artifact()
+    if calibration_error is not None:
+        cal_err = calibration_error
+    elif artifact is not None:
+        cal_err = artifact.calibration_error
+    else:
+        cal_err = _BASE_CALIBRATION_ERROR
+
+    if accuracy_history is not None:
+        acc_hist = accuracy_history
+    elif artifact is not None:
+        acc_hist = artifact.accuracy_history
+    else:
+        acc_hist = dict(_DEFAULT_ACCURACY_HISTORY)
 
     # Data freshness
     if data_source == "seed":

@@ -895,15 +895,21 @@ class HockeyAnalytics:
     def predict_nhl_game(self, features: dict[str, float], elo_prob: float | None = None) -> list[float]:
         """Generate NHL-specific model predictions from features.
 
-        Models with calibrated sensitivity:
+        Models (reduced from 8 to eliminate pseudo-diversity):
         1. Points percentage log5 + home ice (baseline)
-        2. Pythagorean expectation via log5 (goal-based)
-        3. Recent form weighted (momentum, low weight)
-        4. Goal differential strength model
-        5. Goaltender matchup model
-        6. Composite with special teams + rest adjustments
-        7. (optional) Market-implied probability
-        8. (optional) Elo rating prediction
+        2. Pythagorean + possession quality (goal-based, Corsi/xG-adjusted)
+        3. Goal differential + special teams + rest (situational)
+        4. Goaltender matchup model
+        5. (optional) Elo rating prediction
+        6. (optional) Market-implied probability (standalone, not blended)
+
+        Removed from prior version:
+        - Old M3 (recent form): low signal, correlated with M1
+        - Old M6 (composite average): circular — it was the average of other
+          models, so it always got highest weight via consensus-proximity
+          weighting. That's not a model, it's a mirror.
+        - Old M7 (market blend): market is now included as a standalone
+          signal, not blended with model average.
 
         All inputs are regressed to the mean based on games played.
         NHL game outcomes have ~58-62% max predictability.
@@ -912,8 +918,6 @@ class HockeyAnalytics:
         ap = features.get("away_pts_pct", 0.5)
         hgd = features.get("home_goal_diff_pg", 0.0)
         agd = features.get("away_goal_diff_pg", 0.0)
-        hrf = features.get("home_recent_form", 0.5)
-        arf = features.get("away_recent_form", 0.5)
         ge = features.get("goaltender_edge", 0.0)
         ste = features.get("home_st_edge", 0.0)
         re = features.get("rest_edge", 0.0)
@@ -924,6 +928,12 @@ class HockeyAnalytics:
         a_gf_pg = features.get("away_gf_per_game", 3.0)
         a_ga_pg = features.get("away_ga_per_game", 3.0)
 
+        # Corsi/xG — now actually consumed by models
+        h_corsi = features.get("home_corsi_pct", 0.50)
+        a_corsi = features.get("away_corsi_pct", 0.50)
+        h_xgf = features.get("home_xgf_pct", 0.50)
+        a_xgf = features.get("away_xgf_pct", 0.50)
+
         # Regress stats to the mean based on sample size
         hp = self.regress_to_mean(hp, 0.5, int(h_gp))
         ap = self.regress_to_mean(ap, 0.5, int(a_gp))
@@ -932,16 +942,14 @@ class HockeyAnalytics:
         home_boost = 0.04
 
         # Model 1: Points percentage log5 (standard head-to-head formula)
-        # log5: P(A beats B) = (pA - pA*pB) / (pA + pB - 2*pA*pB)
-        # Clamp inputs away from 0 and 1 to prevent singularity
         hp_c = max(0.01, min(0.99, hp))
         ap_c = max(0.01, min(0.99, ap))
         denom = hp_c + ap_c - 2 * hp_c * ap_c
         m1 = (hp_c - hp_c * ap_c) / denom if abs(denom) > 1e-8 else 0.5
         m1 += home_boost
 
-        # Model 2: Pythagorean expectation via log5
-        # Use actual GF/GA per game to compute Pythagorean win%, then log5
+        # Model 2: Pythagorean + possession quality adjustment
+        # Base: Pythagorean expectation via log5
         exp = 2.05
         h_gf = max(h_gf_pg, 0.01)
         h_ga = max(h_ga_pg, 0.01)
@@ -949,53 +957,46 @@ class HockeyAnalytics:
         a_ga = max(a_ga_pg, 0.01)
         h_pyth = h_gf ** exp / (h_gf ** exp + h_ga ** exp)
         a_pyth = a_gf ** exp / (a_gf ** exp + a_ga ** exp)
-        # Regress Pythagorean estimates too
         h_pyth = self.regress_to_mean(h_pyth, 0.5, int(h_gp))
         a_pyth = self.regress_to_mean(a_pyth, 0.5, int(a_gp))
         h_pyth_c = max(0.01, min(0.99, h_pyth))
         a_pyth_c = max(0.01, min(0.99, a_pyth))
         denom2 = h_pyth_c + a_pyth_c - 2 * h_pyth_c * a_pyth_c
-        m2 = (h_pyth_c - h_pyth_c * a_pyth_c) / denom2 if abs(denom2) > 1e-8 else 0.5
-        m2 += home_boost
+        m2_base = (h_pyth_c - h_pyth_c * a_pyth_c) / denom2 if abs(denom2) > 1e-8 else 0.5
+        m2_base += home_boost
 
-        # Model 3: Recent form (low weight — noisy, low predictive power)
-        form_diff = hrf - arf
-        m3 = 0.5 + form_diff * 0.25 + home_boost
+        # Possession quality adjustment from Corsi and xG
+        # Corsi differential: >50% means you're outchancing the opponent.
+        # xG differential: >50% means your chances are higher quality.
+        # These adjust the Pythagorean estimate — a team outscoring its xG
+        # is likely to regress; a team underperforming its xG may improve.
+        corsi_edge = (h_corsi - a_corsi)  # range: roughly -0.10 to +0.10
+        xgf_edge = (h_xgf - a_xgf)        # range: roughly -0.10 to +0.10
+        # Weight: xG is more predictive than raw Corsi
+        possession_adj = 0.15 * corsi_edge + 0.25 * xgf_edge
+        m2 = m2_base + possession_adj
 
-        # Model 4: Goal differential strength
-        # Scale: +0.5 GD/game diff -> ~0.08 probability edge
+        # Model 3: Goal differential + special teams + rest (situational)
         gd_diff = hgd - agd
-        m4 = 0.5 + gd_diff * 0.16 + home_boost
-
-        # Model 5: Goaltender matchup
-        # Edge from goaltender_matchup_edge() already calibrated to realistic range
-        m5 = 0.5 + ge + home_boost
-
-        # Model 6: Composite with special teams + rest
-        base = (m1 + m2 + m3 + m4 + m5) / 5
-        # Special teams: typical range is -0.10 to +0.10, worth ~3% probability per 0.10
+        m3_base = 0.5 + gd_diff * 0.16 + home_boost
         st_adj = ste * 0.3
-        # Rest: B2B penalty = ~0.045, directly additive
-        m6 = base + st_adj + re
+        m3 = m3_base + st_adj + re
 
-        models = [float(np.clip(x, 0.01, 0.99)) for x in [m1, m2, m3, m4, m5, m6]]
+        # Model 4: Goaltender matchup
+        m4 = 0.5 + ge + home_boost
 
-        # Model 7 (optional): Market-implied probability
-        # The market knows things models don't -- injuries, lineup changes, sharp money.
-        # Only include if the probability is between 0.15 and 0.85 (filter out broken odds).
-        # Use inverse-variance weighting: market gets 0.30, model average gets 0.70.
-        market_prob = features.get("market_implied_prob")
-        if market_prob is not None and market_prob > 0 and 0.15 <= market_prob <= 0.85:
-            model_avg = sum(models) / len(models)
-            blended = 0.70 * model_avg + 0.30 * market_prob
-            models.append(float(np.clip(blended, 0.01, 0.99)))
+        models = [float(np.clip(x, 0.01, 0.99)) for x in [m1, m2, m3, m4]]
 
-        # Model 8 (optional): Elo rating prediction
-        # FiveThirtyEight-style Elo with K=6, home ice +50 Elo points.
-        # Elo captures long-term team strength independent of the other models'
-        # feature engineering. Include if a valid probability was passed.
+        # Model 5 (optional): Elo rating prediction
         if elo_prob is not None and 0.01 <= elo_prob <= 0.99:
             models.append(float(np.clip(elo_prob, 0.01, 0.99)))
+
+        # Model 6 (optional): Market-implied probability
+        # Included as a standalone signal, not blended with model average.
+        # The market is genuinely independent information.
+        market_prob = features.get("market_implied_prob")
+        if market_prob is not None and market_prob > 0 and 0.15 <= market_prob <= 0.85:
+            models.append(float(np.clip(market_prob, 0.01, 0.99)))
 
         return models
 

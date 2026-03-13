@@ -11,7 +11,7 @@ Workflows handle the "thinking" so the agent just presents results.
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from ..engine.confidence import build_workflow_meta
@@ -112,13 +112,15 @@ class WorkflowEngine:
         # 1. Refresh
         self.toolkit.refresh_data(source="nhl", team=team)
 
+        season = getattr(self.toolkit, "_CURRENT_SEASON", "2025-26")
+
         # 2. Find the game
         if game_id:
             games = self.toolkit.query_games(sport="NHL")
             game = next((g for g in games.get("games", []) if g.get("game_id") == game_id), None)
         elif team:
             games = self.toolkit.query_games(sport="NHL", team=team, status="scheduled")
-            game = games.get("games", [None])[0] if games.get("count", 0) > 0 else None
+            game = _select_target_game(games.get("games", []))
         else:
             return {"error": "provide team or game_id"}
 
@@ -130,12 +132,14 @@ class WorkflowEngine:
         away = game["away_team"]
 
         # 3. Team profiles
-        home_stats = self.toolkit.query_team_stats(team_id=home, sport="NHL")
-        away_stats = self.toolkit.query_team_stats(team_id=away, sport="NHL")
-        home_adv = self.toolkit.query_advanced_stats(team_id=home)
-        away_adv = self.toolkit.query_advanced_stats(team_id=away)
-        home_goalies = self.toolkit.query_goaltender_stats(team=home)
-        away_goalies = self.toolkit.query_goaltender_stats(team=away)
+        home_stats = self.toolkit.query_team_stats(team_id=home, sport="NHL", season=season)
+        away_stats = self.toolkit.query_team_stats(team_id=away, sport="NHL", season=season)
+        home_adv = self.toolkit.query_advanced_stats(team_id=home, season=season)
+        away_adv = self.toolkit.query_advanced_stats(team_id=away, season=season)
+        home_goalies = self.toolkit.query_goaltender_stats(team=home, season=season)
+        away_goalies = self.toolkit.query_goaltender_stats(team=away, season=season)
+        home_roster = self.toolkit.query_roster(team=home, season=season)
+        away_roster = self.toolkit.query_roster(team=away, season=season)
 
         # 3b. Head-to-head season series
         h2h = self._head_to_head(home, away)
@@ -149,13 +153,13 @@ class WorkflowEngine:
         # 6. Odds and value
         odds = self.toolkit.compare_odds(gid)
         pred_value = prediction.get("prediction", {}).get("value", 0.5)
-
-        ev_result = None
-        kelly_result = None
-        if odds.get("best_home") and odds["best_home"].get("odds"):
-            ev_result = self.toolkit.calculate_ev(pred_value, odds["best_home"]["odds"])
-            if ev_result.get("is_positive_ev"):
-                kelly_result = self.toolkit.kelly_sizing(pred_value, odds["best_home"]["odds"])
+        market_eval = _evaluate_market_sides(
+            toolkit=self.toolkit,
+            home_team=home,
+            away_team=away,
+            home_win_prob=pred_value,
+            odds=odds,
+        )
 
         # 7. Build narrative
         hs = home_stats.get("teams", [{}])[0].get("stats", {}) if home_stats.get("count") else {}
@@ -164,46 +168,58 @@ class WorkflowEngine:
         home_record = f"{hs.get('wins', 0)}-{hs.get('losses', 0)}-{hs.get('overtime_losses', 0)}"
         away_record = f"{as_.get('wins', 0)}-{as_.get('losses', 0)}-{as_.get('overtime_losses', 0)}"
 
-        home_starter = _find_starter(home_goalies)
-        away_starter = _find_starter(away_goalies)
+        home_starter = _find_named_goalie(home_goalies, prediction.get("home_goaltender"))
+        away_starter = _find_named_goalie(away_goalies, prediction.get("away_goaltender"))
+        defaulted = set(prediction.get("defaulted_features") or [])
+        features = prediction.get("features", {})
+        best_bet = market_eval.get("best_bet") or {}
 
         narrative = {
             "headline": f"{home} ({home_record}) vs {away} ({away_record})",
-            "home_team": {
-                "abbrev": home,
-                "record": home_record,
-                "points": hs.get("points", 0),
-                "recent_form": hs.get("recent_form", ""),
-                "starter": home_starter.get("name", "TBD") if home_starter else "TBD",
-                "starter_sv_pct": home_starter.get("save_pct", 0) if home_starter else 0,
-            },
-            "away_team": {
-                "abbrev": away,
-                "record": away_record,
-                "points": as_.get("points", 0),
-                "recent_form": as_.get("recent_form", ""),
-                "starter": away_starter.get("name", "TBD") if away_starter else "TBD",
-                "starter_sv_pct": away_starter.get("save_pct", 0) if away_starter else 0,
-            },
+            "home_team": _build_team_snapshot(
+                team=home,
+                record=home_record,
+                stats=hs,
+                advanced=home_adv.get("teams", [{}])[0].get("stats", {}) if home_adv.get("count") else {},
+                roster=home_roster.get("players", []),
+                starter=home_starter,
+            ),
+            "away_team": _build_team_snapshot(
+                team=away,
+                record=away_record,
+                stats=as_,
+                advanced=away_adv.get("teams", [{}])[0].get("stats", {}) if away_adv.get("count") else {},
+                roster=away_roster.get("players", []),
+                starter=away_starter,
+            ),
             "prediction": prediction.get("prediction", {}),
-            "features": prediction.get("features", {}),
+            "features": features,
+            "confidence": prediction.get("confidence"),
+            "defaulted_features": prediction.get("defaulted_features"),
+            "data_provenance": prediction.get("data_provenance"),
             "head_to_head": h2h,
             "rest": rest_info,
             "odds": odds,
-            "ev": ev_result,
-            "sizing": kelly_result,
+            "market_evaluation": market_eval,
+            "best_bet": market_eval.get("best_bet"),
+            "ev": best_bet.get("ev"),
+            "sizing": best_bet.get("kelly"),
         }
 
-        # Key factors narrative — only mention factors the model actually used
-        # (skip features that were defaulted to neutral values)
-        defaulted = set(prediction.get("defaulted_features") or [])
+        # Key factors narrative — only mention factors the model actually used.
         factors = []
+        context_notes = []
         if pred_value > 0.55:
             factors.append(f"{home} favored at {pred_value:.0%}")
         elif pred_value < 0.45:
             factors.append(f"{away} favored at {1-pred_value:.0%}")
         else:
             factors.append("Toss-up game")
+
+        st_edge = features.get("home_st_edge", 0.0)
+        if abs(st_edge) >= 0.015:
+            advantaged_team = home if st_edge > 0 else away
+            factors.append(f"Special teams edge leans {advantaged_team}")
 
         if "goaltender_edge" not in defaulted:
             if home_starter and home_starter.get("save_pct", 0) > 0.920:
@@ -218,18 +234,38 @@ class WorkflowEngine:
                 factors.append(f"{away} on a back-to-back (fatigue penalty)")
 
         if h2h["games_played"] > 0:
-            factors.append(
+            context_notes.append(
                 f"Season series: {home} {h2h['home_team_wins']}-{h2h['away_team_wins']} vs {away}"
                 + (f" (last meeting: {h2h['last_meeting']})" if h2h["last_meeting"] else "")
             )
 
-        if ev_result and ev_result.get("is_positive_ev"):
-            factors.append(f"+EV opportunity: {ev_result['expected_value']:.1%} edge")
+        for team_code, adv_stats in (
+            (home, home_adv.get("teams", [{}])[0].get("stats", {}) if home_adv.get("count") else {}),
+            (away, away_adv.get("teams", [{}])[0].get("stats", {}) if away_adv.get("count") else {}),
+        ):
+            analytics_note = _build_analytics_note(team_code, adv_stats)
+            if analytics_note:
+                context_notes.append(analytics_note)
+
+        for team_code, roster_result in ((home, home_roster), (away, away_roster)):
+            roster_note = _build_roster_note(team_code, roster_result.get("players", []))
+            if roster_note:
+                context_notes.append(roster_note)
+
+        if market_eval.get("best_bet"):
+            best_bet = market_eval["best_bet"]
+            context_notes.append(
+                f"Best market side: {best_bet['team']} {best_bet['side']} at {best_bet['sportsbook']} "
+                f"({best_bet['probability']:.0%} model vs {best_bet['implied_probability']:.0%} implied)"
+            )
 
         if defaulted:
-            factors.append(f"Note: {len(defaulted)} features defaulted (not measured): {', '.join(sorted(defaulted))}")
+            context_notes.append(
+                f"Model defaulted {len(defaulted)} neutral features: {', '.join(sorted(defaulted))}"
+            )
 
         narrative["key_factors"] = factors
+        narrative["context_notes"] = context_notes
         return narrative
 
     # =====================================================================
@@ -265,6 +301,15 @@ class WorkflowEngine:
             best_home = odds.get("best_home", {})
             best_away = odds.get("best_away", {})
 
+            confidence_meta = pred.get("confidence", {})
+            market_eval = _evaluate_market_sides(
+                toolkit=self.toolkit,
+                home_team=home,
+                away_team=away,
+                home_win_prob=pred_val,
+                odds=odds,
+            )
+
             entry = {
                 "game_id": gid,
                 "matchup": f"{away} @ {home}",
@@ -273,40 +318,25 @@ class WorkflowEngine:
                 "home_win_prob": round(pred_val, 3),
                 "away_win_prob": round(1 - pred_val, 3),
                 "pick": home if pred_val > 0.5 else away,
-                "confidence": round(abs(pred_val - 0.5) * 200, 1),  # 0-100 scale
+                "confidence": _confidence_sort_key(confidence_meta),
+                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
+                "confidence_interval": confidence_meta.get("confidence_interval"),
+                "defaulted_features": pred.get("defaulted_features"),
+                "data_provenance": pred.get("data_provenance"),
                 "best_home_odds": best_home.get("odds") if best_home else None,
                 "best_away_odds": best_away.get("odds") if best_away else None,
+                "best_bet": market_eval.get("best_bet"),
             }
 
-            # Check for value
-            if best_home and best_home.get("odds"):
-                ev = self.toolkit.calculate_ev(pred_val, best_home["odds"])
-                if ev.get("is_positive_ev"):
-                    entry["value_bet"] = {
-                        "side": "home",
-                        "team": home,
-                        "ev": ev["expected_value"],
-                        "edge": ev["edge"],
-                        "book": best_home.get("sportsbook", ""),
-                    }
-                    value_picks.append(entry["value_bet"])
-
-            if best_away and best_away.get("odds"):
-                ev = self.toolkit.calculate_ev(1 - pred_val, best_away["odds"])
-                if ev.get("is_positive_ev"):
-                    entry["value_bet"] = {
-                        "side": "away",
-                        "team": away,
-                        "ev": ev["expected_value"],
-                        "edge": ev["edge"],
-                        "book": best_away.get("sportsbook", ""),
-                    }
-                    value_picks.append(entry["value_bet"])
+            if market_eval.get("best_bet"):
+                entry["value_bet"] = market_eval["best_bet"]
+                value_picks.append(entry["value_bet"])
 
             slate.append(entry)
 
         # Sort by confidence
         slate.sort(key=lambda x: x["confidence"], reverse=True)
+        value_picks.sort(key=lambda x: x.get("ev", {}).get("expected_value", 0), reverse=True)
 
         return {
             "date": date.today().isoformat(),
@@ -488,6 +518,12 @@ class WorkflowEngine:
             prob = opp.get("model_probability", 0.5)
             odds = opp.get("decimal_odds", 2.0)
             sizing = self.toolkit.kelly_sizing(prob, odds, bankroll)
+            prediction = (
+                self.toolkit.nhl_predict_game(opp.get("game_id", ""))
+                if sport.upper() == "NHL"
+                else self.toolkit.predict_game(opp.get("game_id", ""))
+            )
+            confidence_meta = prediction.get("confidence", {})
 
             sized_bets.append({
                 "game_id": opp.get("game_id"),
@@ -501,6 +537,10 @@ class WorkflowEngine:
                 "ev_per_dollar": opp.get("expected_value"),
                 "recommended_stake": sizing.get("recommended_stake", 0),
                 "kelly_fraction": sizing.get("fraction", 0),
+                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
+                "confidence_interval": confidence_meta.get("confidence_interval"),
+                "defaulted_features": prediction.get("defaulted_features"),
+                "requires_manual_review": confidence_meta.get("reliability_grade") in {"D", "F"},
             })
             total_recommended += sizing.get("recommended_stake", 0)
 
@@ -524,10 +564,11 @@ class WorkflowEngine:
     def cap_strategy(self, team: str) -> dict[str, Any]:
         """Full cap analysis with trade deadline strategy."""
         self.toolkit.refresh_data(source="nhl", team=team)
+        season = getattr(self.toolkit, "_CURRENT_SEASON", "2025-26")
 
-        cap = self.toolkit.query_cap_data(team=team)
-        roster = self.toolkit.query_roster(team=team)
-        playoff = self.toolkit.playoff_odds(team_id=team)
+        cap = self.toolkit.query_cap_data(team=team, season=season)
+        roster = self.toolkit.query_roster(team=team, season=season)
+        playoff = self.toolkit.playoff_odds(team_id=team, season=season)
 
         analysis = cap.get("cap_analysis", {})
         contracts = cap.get("contracts", [])
@@ -586,8 +627,9 @@ class WorkflowEngine:
     def playoff_race(self, team: str | None = None, conference: str | None = None) -> dict[str, Any]:
         """Playoff race analysis with standings context."""
         self.toolkit.refresh_data(source="nhl")
+        season = getattr(self.toolkit, "_CURRENT_SEASON", "2025-26")
 
-        all_teams = self.toolkit.query_team_stats(sport="NHL")
+        all_teams = self.toolkit.query_team_stats(sport="NHL", season=season)
         teams_data = all_teams.get("teams", [])
 
         # Build standings
@@ -595,7 +637,7 @@ class WorkflowEngine:
         for t in teams_data:
             stats = t.get("stats", {})
             tid = t.get("team_id", "")
-            playoff = self.toolkit.playoff_odds(team_id=tid)
+            playoff = self.toolkit.playoff_odds(team_id=tid, season=season)
 
             standings.append({
                 "team": tid,
@@ -645,21 +687,18 @@ class WorkflowEngine:
 
     def goaltender_duel(self, goalie1_team: str, goalie2_team: str) -> dict[str, Any]:
         """Head-to-head goaltender comparison."""
-        g1 = self.toolkit.query_goaltender_stats(team=goalie1_team)
-        g2 = self.toolkit.query_goaltender_stats(team=goalie2_team)
-
-        g1_starters = [g for g in g1.get("goaltenders", []) if g.get("stats", {}).get("role") == "starter"]
-        g2_starters = [g for g in g2.get("goaltenders", []) if g.get("stats", {}).get("role") == "starter"]
-
-        g1_data = g1_starters[0]["stats"] if g1_starters else g1.get("goaltenders", [{}])[0].get("stats", {})
-        g2_data = g2_starters[0]["stats"] if g2_starters else g2.get("goaltenders", [{}])[0].get("stats", {})
+        season = getattr(self.toolkit, "_CURRENT_SEASON", "2025-26")
+        g1 = self.toolkit.query_goaltender_stats(team=goalie1_team, season=season)
+        g2 = self.toolkit.query_goaltender_stats(team=goalie2_team, season=season)
+        g1_data, g1_selection = _select_goalie_profile(g1)
+        g2_data, g2_selection = _select_goalie_profile(g2)
 
         matchup = self.toolkit.hockey.goaltender_matchup_edge(
             g1_data.get("save_pct", 0.907), g2_data.get("save_pct", 0.907),
             g1_data.get("gsaa", 0), g2_data.get("gsaa", 0),
         )
 
-        def _goalie_profile(stats: dict) -> dict:
+        def _goalie_profile(stats: dict, selection_method: str) -> dict:
             return {
                 "name": stats.get("name", ""),
                 "sv_pct": stats.get("save_pct", 0),
@@ -669,6 +708,8 @@ class WorkflowEngine:
                 "games": stats.get("games_played", 0),
                 "quality_starts": stats.get("quality_starts", 0),
                 "shutouts": stats.get("shutouts", 0),
+                "selection_method": selection_method,
+                "situational_splits": _goalie_situational_splits(stats),
             }
 
         categories_won = {"goalie1": 0, "goalie2": 0}
@@ -684,8 +725,8 @@ class WorkflowEngine:
                 categories_won["goalie2"] += 1
 
         return {
-            "goalie1": _goalie_profile(g1_data),
-            "goalie2": _goalie_profile(g2_data),
+            "goalie1": _goalie_profile(g1_data, g1_selection),
+            "goalie2": _goalie_profile(g2_data, g2_selection),
             "matchup_edge": matchup,
             "categories_won": categories_won,
             "verdict": (
@@ -706,13 +747,16 @@ class WorkflowEngine:
     def team_comparison(self, team1: str, team2: str) -> dict[str, Any]:
         """Side-by-side team comparison across all dimensions."""
         self.toolkit.refresh_data(source="nhl")
+        season = getattr(self.toolkit, "_CURRENT_SEASON", "2025-26")
 
-        r1 = self.toolkit.season_review(team_id=team1)
-        r2 = self.toolkit.season_review(team_id=team2)
-        a1 = self.toolkit.query_advanced_stats(team_id=team1)
-        a2 = self.toolkit.query_advanced_stats(team_id=team2)
-        g1 = self.toolkit.query_goaltender_stats(team=team1)
-        g2 = self.toolkit.query_goaltender_stats(team=team2)
+        r1 = self.toolkit.season_review(team_id=team1, season=season)
+        r2 = self.toolkit.season_review(team_id=team2, season=season)
+        a1 = self.toolkit.query_advanced_stats(team_id=team1, season=season)
+        a2 = self.toolkit.query_advanced_stats(team_id=team2, season=season)
+        g1 = self.toolkit.query_goaltender_stats(team=team1, season=season)
+        g2 = self.toolkit.query_goaltender_stats(team=team2, season=season)
+        r1_roster = self.toolkit.query_roster(team=team1, season=season)
+        r2_roster = self.toolkit.query_roster(team=team2, season=season)
 
         a1_stats = a1.get("teams", [{}])[0].get("stats", {}) if a1.get("count") else {}
         a2_stats = a2.get("teams", [{}])[0].get("stats", {}) if a2.get("count") else {}
@@ -735,6 +779,18 @@ class WorkflowEngine:
             "team2": {"abbrev": team2, "record": r2.get("record", ""), "points": r2.get("points", 0)},
             "categories": categories,
             "category_wins": {team1: t1_wins, team2: t2_wins},
+            "goaltending": {
+                team1: _goalie_team_summary(g1.get("goaltenders", [])),
+                team2: _goalie_team_summary(g2.get("goaltenders", [])),
+            },
+            "roster_depth": {
+                team1: _roster_summary(r1_roster.get("players", [])),
+                team2: _roster_summary(r2_roster.get("players", [])),
+            },
+            "analytics_context": {
+                team1: _analytics_context(a1_stats),
+                team2: _analytics_context(a2_stats),
+            },
             "review1": r1,
             "review2": r2,
         }
@@ -778,6 +834,12 @@ class WorkflowEngine:
             prob = opp.get("model_probability", 0.5)
             odds = opp.get("decimal_odds", 2.0)
             sizing = self.toolkit.kelly_sizing(prob, odds, bankroll)
+            prediction = (
+                self.toolkit.nhl_predict_game(opp.get("game_id", ""))
+                if sport.upper() == "NHL"
+                else self.toolkit.predict_game(opp.get("game_id", ""))
+            )
+            confidence_meta = prediction.get("confidence", {})
 
             stake = sizing.get("recommended_stake", 0) * (kelly_mult / 0.5)  # adjust for risk
             stake = min(stake, max_stake - total_stake)  # don't exceed daily limit
@@ -795,6 +857,9 @@ class WorkflowEngine:
                 "ev_per_dollar": round(opp.get("expected_value", 0), 3),
                 "stake": round(stake, 2),
                 "to_win": round(stake * (odds - 1), 2),
+                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
+                "defaulted_features": prediction.get("defaulted_features"),
+                "requires_manual_review": confidence_meta.get("reliability_grade") in {"D", "F"},
             })
             total_stake += stake
 
@@ -823,6 +888,7 @@ class WorkflowEngine:
             "total_to_win": round(sum(p["to_win"] for p in plays), 2),
             "expected_profit": round(expected_profit, 2),
             "games_scanned": value.get("games_scanned", 0),
+            "manual_review_play_count": sum(1 for p in plays if p["requires_manual_review"]),
         }
 
     # =====================================================================
@@ -894,13 +960,231 @@ class WorkflowEngine:
 
 # --- Standalone helpers ---
 
-def _find_starter(goalies_result: dict) -> dict | None:
-    """Find the starting goaltender from query results."""
+def _select_target_game(games: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the nearest scheduled game, not an arbitrary first row."""
+    if not games:
+        return None
+    return min(games, key=lambda g: (str(g.get("date", "")), str(g.get("game_id", ""))))
+
+
+def _confidence_sort_key(confidence_meta: dict[str, Any]) -> float:
+    """Numeric sort key derived from workflow reliability metadata."""
+    if not isinstance(confidence_meta, dict):
+        return 0.0
+    grade_score = {"A": 90.0, "B": 75.0, "C": 60.0, "D": 35.0, "F": 10.0}.get(
+        confidence_meta.get("reliability_grade"),
+        0.0,
+    )
+    interval = confidence_meta.get("confidence_interval", {})
+    width = interval.get("width", 1.0) if isinstance(interval, dict) else 1.0
+    width_penalty = min(max(float(width), 0.0), 1.0) * 20.0
+    return round(max(grade_score - width_penalty, 0.0), 1)
+
+
+def _evaluate_market_sides(
+    toolkit: ABBAToolkit,
+    home_team: str,
+    away_team: str,
+    home_win_prob: float,
+    odds: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate both market sides and pick the better positive-EV option."""
+    sides = []
+    candidates = [
+        ("home", home_team, home_win_prob, odds.get("best_home")),
+        ("away", away_team, 1.0 - home_win_prob, odds.get("best_away")),
+    ]
+
+    for side, team, probability, market in candidates:
+        if not market or not market.get("odds"):
+            continue
+        ev = toolkit.calculate_ev(probability, market["odds"])
+        kelly = toolkit.kelly_sizing(probability, market["odds"]) if ev.get("is_positive_ev") else None
+        sides.append({
+            "side": side,
+            "team": team,
+            "sportsbook": market.get("sportsbook", ""),
+            "odds": market["odds"],
+            "probability": probability,
+            "implied_probability": round(1.0 / market["odds"], 4),
+            "ev": ev,
+            "kelly": kelly,
+        })
+
+    positive = [side for side in sides if side.get("ev", {}).get("is_positive_ev")]
+    best = max(positive, key=lambda side: side["ev"].get("expected_value", 0.0)) if positive else None
+    return {"sides": sides, "best_bet": best}
+
+
+def _find_named_goalie(goalies_result: dict[str, Any], goalie_name: str | None) -> dict[str, Any] | None:
+    """Resolve the specific goalie used by the model from a query result set."""
     goalies = goalies_result.get("goaltenders", [])
-    for g in goalies:
-        if g.get("stats", {}).get("role") == "starter":
-            return g.get("stats", {})
-    return goalies[0].get("stats", {}) if goalies else None
+    if goalie_name:
+        for goalie in goalies:
+            stats = goalie.get("stats", {})
+            if stats.get("name") == goalie_name:
+                return stats
+    return _select_goalie_profile(goalies_result)[0]
+
+
+def _select_goalie_profile(goalies_result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Select a goalie profile deterministically for display."""
+    goalies = goalies_result.get("goaltenders", [])
+    if not goalies:
+        return {}, "none"
+    for goalie in goalies:
+        stats = goalie.get("stats", {})
+        if stats.get("role") == "starter":
+            return stats, "role_tag"
+    best = max(goalies, key=lambda g: g.get("stats", {}).get("games_played", 0))
+    return best.get("stats", {}), "max_games_played"
+
+
+def _build_team_snapshot(
+    team: str,
+    record: str,
+    stats: dict[str, Any],
+    advanced: dict[str, Any],
+    roster: list[dict[str, Any]],
+    starter: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compact workflow-facing snapshot of a team's current state."""
+    roster_summary = _roster_summary(roster)
+    return {
+        "abbrev": team,
+        "record": record,
+        "points": stats.get("points", 0),
+        "recent_form": stats.get("recent_form", ""),
+        "starter": starter.get("name", "TBD") if starter else "TBD",
+        "starter_sv_pct": starter.get("save_pct", 0) if starter else 0,
+        "special_teams": {
+            "pp_pct": stats.get("power_play_percentage", 0),
+            "pk_pct": stats.get("penalty_kill_percentage", 0),
+        },
+        "analytics": _analytics_context(advanced),
+        "roster_depth": roster_summary,
+    }
+
+
+def _analytics_context(advanced: dict[str, Any]) -> dict[str, Any]:
+    """Return only the advanced metrics that actually exist in storage."""
+    return {
+        "corsi_pct": advanced.get("corsi_pct"),
+        "xgf_pct": advanced.get("xgf_pct"),
+        "pdo": advanced.get("pdo"),
+        "shooting_pct": advanced.get("shooting_pct"),
+        "save_pct_5v5": advanced.get("save_pct_5v5"),
+    }
+
+
+def _build_analytics_note(team: str, advanced: dict[str, Any]) -> str | None:
+    """Human-readable analytics note for context-only workflow output."""
+    if not advanced:
+        return None
+    notes = []
+    corsi = advanced.get("corsi_pct")
+    xgf = advanced.get("xgf_pct")
+    if corsi is not None:
+        notes.append(f"{team} Corsi {corsi:.1f}%")
+    if xgf is not None:
+        notes.append(f"xGF {xgf:.1f}%")
+    return " | ".join(notes) if notes else None
+
+
+def _roster_summary(players: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize top-end production, injuries, and line distribution."""
+    if not players:
+        return {"top_scorers": [], "injury_count": 0, "line_distribution": {}}
+
+    sorted_players = sorted(
+        players,
+        key=lambda player: (
+            player.get("stats", {}).get("points", 0),
+            player.get("stats", {}).get("goals", 0),
+        ),
+        reverse=True,
+    )
+    top_scorers = [
+        {
+            "name": player.get("name", ""),
+            "position": player.get("position", ""),
+            "line_number": player.get("line_number"),
+            "points": player.get("stats", {}).get("points", 0),
+            "goals": player.get("stats", {}).get("goals", 0),
+            "assists": player.get("stats", {}).get("assists", 0),
+        }
+        for player in sorted_players[:3]
+    ]
+
+    injured = [
+        {"name": player.get("name", ""), "status": player.get("injury_status", "unknown")}
+        for player in players
+        if player.get("injury_status", "healthy") != "healthy"
+    ]
+
+    line_distribution: dict[str, int] = {}
+    for player in players:
+        line_number = player.get("line_number")
+        if line_number is None:
+            continue
+        key = str(line_number)
+        line_distribution[key] = line_distribution.get(key, 0) + 1
+
+    return {
+        "top_scorers": top_scorers,
+        "injury_count": len(injured),
+        "injuries": injured[:5],
+        "line_distribution": line_distribution,
+    }
+
+
+def _build_roster_note(team: str, players: list[dict[str, Any]]) -> str | None:
+    """Context-only note summarizing roster health and top-end production."""
+    summary = _roster_summary(players)
+    top = summary.get("top_scorers", [])
+    if not top and not summary.get("injury_count"):
+        return None
+
+    note_parts = []
+    if top:
+        leaders = ", ".join(f"{player['name']} ({player['points']} pts)" for player in top[:2])
+        note_parts.append(f"{team} scoring leaders: {leaders}")
+    if summary.get("injury_count"):
+        note_parts.append(f"{summary['injury_count']} injured skaters on current roster")
+    return " | ".join(note_parts)
+
+
+def _goalie_situational_splits(stats: dict[str, Any]) -> dict[str, Any]:
+    """Expose situation split fields only when they really exist."""
+    split_keys = {
+        "even_strength_save_pct": "even_strength_save_pct",
+        "power_play_save_pct": "power_play_save_pct",
+        "short_handed_save_pct": "short_handed_save_pct",
+    }
+    available = {
+        alias: stats[key]
+        for alias, key in split_keys.items()
+        if stats.get(key) is not None
+    }
+    return {
+        "status": "present" if available else "absent",
+        "splits": available if available else None,
+    }
+
+
+def _goalie_team_summary(goalies: list[dict[str, Any]]) -> dict[str, Any]:
+    """Simple team-level goalie summary for comparison workflows."""
+    if not goalies:
+        return {"starter": None, "backup": None}
+    ordered = sorted(
+        (goalie.get("stats", {}) for goalie in goalies),
+        key=lambda stats: (stats.get("role") == "starter", stats.get("games_played", 0)),
+        reverse=True,
+    )
+    return {
+        "starter": ordered[0] if ordered else None,
+        "backup": ordered[1] if len(ordered) > 1 else None,
+    }
 
 
 def _is_win(game: dict, team: str) -> bool:

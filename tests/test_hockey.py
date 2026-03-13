@@ -493,7 +493,7 @@ class TestNHLPredictions:
             "goaltender_edge": 0.05, "home_st_edge": 0.05, "rest_edge": 0.02,
         }
         preds = hockey.predict_nhl_game(features)
-        assert len(preds) == 6
+        assert len(preds) == 4  # points_log5, pythagorean_possession, situational, goaltender
         for p in preds:
             assert 0.01 <= p <= 0.99
 
@@ -530,8 +530,8 @@ class TestNHLPredictions:
         avg = sum(preds) / len(preds)
         assert 0.50 <= avg <= 0.58  # home ice advantage
 
-    def test_six_models_diverse(self, hockey):
-        """Six models should produce varied predictions."""
+    def test_models_diverse(self, hockey):
+        """Core models should produce varied predictions."""
         features = {
             "home_pts_pct": 0.58, "away_pts_pct": 0.48,
             "home_goal_diff_pg": 0.3, "away_goal_diff_pg": -0.1,
