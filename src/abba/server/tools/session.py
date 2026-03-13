@@ -13,13 +13,14 @@ class SessionToolsMixin:
         self,
         source: str = "all",
         team: str | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Refresh data from live sources. Delegates to DataService."""
         start = time.time()
-        result = self.data_service.refresh(source=source, team=team)
+        result = self.data_service.refresh(source=source, team=team, season=season)
         # Sync refresh timestamp back to toolkit level
         self._last_refresh_ts = self.data_service.last_refresh_ts
-        return self._track("refresh_data", {"source": source, "team": team}, result, start)
+        return self._track("refresh_data", {"source": source, "team": team, "season": season}, result, start)
 
     def run_workflow(self, workflow: str, **kwargs: Any) -> dict[str, Any]:
         """Run a multi-step analytical workflow by name."""

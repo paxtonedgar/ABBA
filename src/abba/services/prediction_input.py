@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from ..engine.hockey import HockeyAnalytics
@@ -49,6 +50,24 @@ def _select_starter(goalies: list[dict[str, Any]]) -> dict[str, Any] | None:
     return best.get("stats")
 
 
+def _select_game_starter(
+    goalies: list[dict[str, Any]],
+    preferred_goalie_id: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """Select a starter, preferring an explicit game-level goalie override."""
+    preferred = str(preferred_goalie_id) if preferred_goalie_id not in (None, "") else None
+    if preferred:
+        for goalie in goalies:
+            if str(goalie.get("goaltender_id", "")) == preferred:
+                return goalie.get("stats"), "game_metadata_override"
+    selected = _select_starter(goalies)
+    if not selected:
+        return None, "none"
+    if selected.get("role") == "starter":
+        return selected, "role_tag"
+    return selected, "max_games_started"
+
+
 def _validate_goalie_stats(
     stats: dict[str, Any] | None, team: str
 ) -> tuple[dict[str, Any] | None, list[str]]:
@@ -63,6 +82,58 @@ def _validate_goalie_stats(
             f"Goaltender matchup model will be excluded."
         ]
     return stats, []
+
+
+def _coerce_game_date(raw: Any) -> date | None:
+    """Convert storage date values into a date object."""
+    if isinstance(raw, date):
+        return raw
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _derive_rest_info(
+    storage: Storage,
+    hockey: HockeyAnalytics,
+    game_date: date | None,
+    home_team: str,
+    away_team: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Derive schedule-based rest information from completed games."""
+    if game_date is None:
+        return None, False
+
+    def _team_schedule_snapshot(team: str) -> tuple[int | None, int]:
+        games = storage.query_games(sport="NHL", team=team, status="final", limit=50)
+        prior_dates = [
+            parsed
+            for game in games
+            if (parsed := _coerce_game_date(game.get("date"))) is not None and parsed < game_date
+        ]
+        if not prior_dates:
+            return None, 0
+        last_game = max(prior_dates)
+        games_last_7 = sum(1 for parsed in prior_dates if 0 < (game_date - parsed).days <= 7)
+        return (game_date - last_game).days, games_last_7
+
+    home_rest_days, home_games_last_7 = _team_schedule_snapshot(home_team)
+    away_rest_days, away_games_last_7 = _team_schedule_snapshot(away_team)
+    if home_rest_days is None or away_rest_days is None:
+        return None, False
+
+    rest_info = hockey.rest_advantage(
+        home_rest_days=home_rest_days,
+        away_rest_days=away_rest_days,
+        home_is_back_to_back=home_rest_days <= 1,
+        away_is_back_to_back=away_rest_days <= 1,
+        home_games_last_7=home_games_last_7,
+        away_games_last_7=away_games_last_7,
+    )
+    return rest_info, True
 
 
 def build_nhl_prediction_input(
@@ -83,6 +154,8 @@ def build_nhl_prediction_input(
 
     home = game.get("home_team", "")
     away = game.get("away_team", "")
+    game_date = _coerce_game_date(game.get("date"))
+    game_metadata = game.get("metadata") if isinstance(game.get("metadata"), dict) else {}
     data_warnings: list[str] = []
 
     home_stats_list = storage.query_team_stats(team_id=home, sport="NHL", season=season)
@@ -123,8 +196,20 @@ def build_nhl_prediction_input(
 
     home_goalies = storage.query_goaltender_stats(team=home, season=season)
     away_goalies = storage.query_goaltender_stats(team=away, season=season)
-    raw_home_goalie = _select_starter(home_goalies)
-    raw_away_goalie = _select_starter(away_goalies)
+    raw_home_goalie, home_goalie_selection = _select_game_starter(
+        home_goalies, game_metadata.get("home_goalie_id")
+    )
+    raw_away_goalie, away_goalie_selection = _select_game_starter(
+        away_goalies, game_metadata.get("away_goalie_id")
+    )
+    if game_metadata.get("home_goalie_id") and home_goalie_selection != "game_metadata_override":
+        data_warnings.append(
+            f"Home game-level goalie override {game_metadata.get('home_goalie_id')} did not match stored goalie stats"
+        )
+    if game_metadata.get("away_goalie_id") and away_goalie_selection != "game_metadata_override":
+        data_warnings.append(
+            f"Away game-level goalie override {game_metadata.get('away_goalie_id')} did not match stored goalie stats"
+        )
     home_goalie, home_goalie_warnings = _validate_goalie_stats(raw_home_goalie, home)
     away_goalie, away_goalie_warnings = _validate_goalie_stats(raw_away_goalie, away)
     data_warnings.extend(home_goalie_warnings)
@@ -145,6 +230,16 @@ def build_nhl_prediction_input(
             "Market blend model excluded. Possible ID mismatch between schedule and odds providers."
         )
 
+    rest_info, has_measured_rest = _derive_rest_info(
+        storage=storage,
+        hockey=hockey,
+        game_date=game_date,
+        home_team=home,
+        away_team=away,
+    )
+    if not has_measured_rest:
+        data_warnings.append("Rest/schedule history absent — rest_edge uses neutral default")
+
     features = hockey.build_nhl_features(
         home_stats,
         away_stats,
@@ -152,6 +247,7 @@ def build_nhl_prediction_input(
         away_advanced=away_adv,
         home_goalie=home_goalie,
         away_goalie=away_goalie,
+        rest_info=rest_info,
         odds_data=game_odds,
     )
     features["home_injury_impact"] = home_player_impact["injury_impact"]
@@ -164,7 +260,8 @@ def build_nhl_prediction_input(
         defaulted_features.extend(["home_corsi_pct", "away_corsi_pct", "home_xgf_pct", "away_xgf_pct"])
     if not home_goalie or not away_goalie:
         defaulted_features.append("goaltender_edge")
-    defaulted_features.append("rest_edge")
+    if not has_measured_rest:
+        defaulted_features.append("rest_edge")
     if not game_odds:
         defaulted_features.append("market_implied_prob")
     if defaulted_features:
@@ -197,18 +294,26 @@ def build_nhl_prediction_input(
         "home_goaltender": {
             "status": "present" if home_goalie else "absent",
             "name": home_goalie.get("name", "unknown") if home_goalie else None,
-            "selection_method": "role_tag" if (home_goalie and home_goalie.get("role")) else "max_games_started" if home_goalie else "none",
+            "selection_method": home_goalie_selection if home_goalie else "none",
             "season": season,
             "as_of": now,
         },
         "away_goaltender": {
             "status": "present" if away_goalie else "absent",
             "name": away_goalie.get("name", "unknown") if away_goalie else None,
-            "selection_method": "role_tag" if (away_goalie and away_goalie.get("role")) else "max_games_started" if away_goalie else "none",
+            "selection_method": away_goalie_selection if away_goalie else "none",
             "season": season,
             "as_of": now,
         },
         "odds": {"status": odds_status, "season": season, "books_matched": len(game_odds), "as_of": now},
+        "rest": {
+            "status": "present" if has_measured_rest else "defaulted",
+            "season": season,
+            "as_of": now,
+            "home_rest_days": rest_info.get("home_rest_days") if rest_info else None,
+            "away_rest_days": rest_info.get("away_rest_days") if rest_info else None,
+            "rest_edge": rest_info.get("rest_edge") if rest_info else 0.0,
+        },
     }
 
     time_since_refresh = (
@@ -239,7 +344,13 @@ def build_nhl_prediction_input(
         },
         "goaltenders": {
             "status": "present" if home_goalie and away_goalie else "absent",
-            "source": "nhl_api" if home_goalie and away_goalie else "default",
+            "source": (
+                "game_metadata_override"
+                if "game_metadata_override" in {home_goalie_selection, away_goalie_selection}
+                else "nhl_api"
+                if home_goalie and away_goalie
+                else "default"
+            ),
             "as_of": now,
             "season": season,
             "freshness_seconds": time_since_refresh,
@@ -265,13 +376,13 @@ def build_nhl_prediction_input(
             "notes": [],
         },
         "rest": {
-            "status": "defaulted",
-            "source": "default",
+            "status": "present" if has_measured_rest else "defaulted",
+            "source": "computed" if has_measured_rest else "default",
             "as_of": now,
             "season": season,
-            "freshness_seconds": None,
-            "defaulted_features": ["rest_edge"],
-            "notes": ["Rest edge is not yet wired into PredictionService inputs"],
+            "freshness_seconds": time_since_refresh,
+            "defaulted_features": [] if has_measured_rest else ["rest_edge"],
+            "notes": [] if has_measured_rest else ["Rest edge could not be derived from schedule history"],
         },
     }
     context_only: PredictionContext = {
@@ -279,7 +390,7 @@ def build_nhl_prediction_input(
         "away_goaltender": away_goalie,
         "player_impact": {"home": home_player_impact, "away": away_player_impact},
         "data_warnings": list(data_warnings),
-        "context_only_features": {"rest_edge_reason": "workflow-computed, not yet model-fed"},
+        "context_only_features": {"rest_info": rest_info or {"rest_edge": 0.0}},
     }
     prediction_input = build_prediction_input(
         game_id=game_id,

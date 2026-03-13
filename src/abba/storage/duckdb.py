@@ -385,7 +385,11 @@ class Storage:
         query = f"SELECT * FROM games {where} ORDER BY date DESC LIMIT ?"
         params.append(limit)
 
-        return self._fetchdicts(self.conn.execute(query, params))
+        rows = self._fetchdicts(self.conn.execute(query, params))
+        for row in rows:
+            if isinstance(row.get("metadata"), str):
+                row["metadata"] = json.loads(row["metadata"])
+        return rows
 
     # --- Odds ---
 
@@ -884,6 +888,8 @@ class Storage:
         rows = self._fetchdicts(self.conn.execute(
             "SELECT * FROM games WHERE game_id = ?", [game_id]
         ))
+        if rows and isinstance(rows[0].get("metadata"), str):
+            rows[0]["metadata"] = json.loads(rows[0]["metadata"])
         return rows[0] if rows else None
 
     # --- Schema discovery ---

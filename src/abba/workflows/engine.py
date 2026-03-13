@@ -149,6 +149,7 @@ class WorkflowEngine:
 
         # 5. Run prediction
         prediction = self.toolkit.nhl_predict_game(gid)
+        prediction_contract = _extract_prediction_contract(prediction)
 
         # 6. Odds and value
         odds = self.toolkit.compare_odds(gid)
@@ -170,9 +171,11 @@ class WorkflowEngine:
 
         home_starter = _find_named_goalie(home_goalies, prediction.get("home_goaltender"))
         away_starter = _find_named_goalie(away_goalies, prediction.get("away_goaltender"))
-        defaulted = set(prediction.get("defaulted_features") or [])
-        features = prediction.get("features", {})
+        defaulted = prediction_contract["defaulted_features"]
+        features = prediction_contract["features"]
         best_bet = market_eval.get("best_bet") or {}
+        model_features_used = prediction_contract["model_features_used"]
+        rest_contract = prediction_contract["provenance"].get("rest", {})
 
         narrative = {
             "headline": f"{home} ({home_record}) vs {away} ({away_record})",
@@ -194,17 +197,15 @@ class WorkflowEngine:
             ),
             "prediction": prediction.get("prediction", {}),
             "features": features,
-            "confidence": prediction.get("confidence"),
-            "defaulted_features": prediction.get("defaulted_features"),
-            "data_provenance": prediction.get("data_provenance"),
             "head_to_head": h2h,
-            "rest": rest_info,
+            "rest": prediction_contract["context_only"].get("context_only_features", {}).get("rest_info", rest_info),
             "odds": odds,
             "market_evaluation": market_eval,
             "best_bet": market_eval.get("best_bet"),
             "ev": best_bet.get("ev"),
             "sizing": best_bet.get("kelly"),
         }
+        narrative.update(_prediction_workflow_fields(prediction, prediction_contract))
 
         # Key factors narrative — only mention factors the model actually used.
         factors = []
@@ -217,20 +218,20 @@ class WorkflowEngine:
             factors.append("Toss-up game")
 
         st_edge = features.get("home_st_edge", 0.0)
-        if abs(st_edge) >= 0.015:
+        if _feature_is_model_active("home_st_edge", model_features_used, defaulted) and abs(st_edge) >= 0.015:
             advantaged_team = home if st_edge > 0 else away
             factors.append(f"Special teams edge leans {advantaged_team}")
 
-        if "goaltender_edge" not in defaulted:
+        if _feature_is_model_active("goaltender_edge", model_features_used, defaulted):
             if home_starter and home_starter.get("save_pct", 0) > 0.920:
                 factors.append(f"Elite goaltending: {home_starter['name']} ({home_starter['save_pct']:.3f} Sv%)")
             if away_starter and away_starter.get("save_pct", 0) > 0.920:
                 factors.append(f"Elite goaltending: {away_starter['name']} ({away_starter['save_pct']:.3f} Sv%)")
 
-        if "rest_edge" not in defaulted:
-            if rest_info.get("home_b2b"):
+        if _feature_is_model_active("rest_edge", model_features_used, defaulted):
+            if rest_contract.get("home_rest_days", rest_info.get("home_rest_days", 3)) <= 1:
                 factors.append(f"{home} on a back-to-back (fatigue penalty)")
-            if rest_info.get("away_b2b"):
+            if rest_contract.get("away_rest_days", rest_info.get("away_rest_days", 3)) <= 1:
                 factors.append(f"{away} on a back-to-back (fatigue penalty)")
 
         if h2h["games_played"] > 0:
@@ -295,6 +296,7 @@ class WorkflowEngine:
             # Quick prediction
             pred = self.toolkit.nhl_predict_game(gid) if sport == "NHL" else self.toolkit.predict_game(gid)
             pred_val = pred.get("prediction", {}).get("value", 0.5)
+            prediction_contract = _extract_prediction_contract(pred)
 
             # Odds check
             odds = self.toolkit.compare_odds(gid)
@@ -318,15 +320,11 @@ class WorkflowEngine:
                 "home_win_prob": round(pred_val, 3),
                 "away_win_prob": round(1 - pred_val, 3),
                 "pick": home if pred_val > 0.5 else away,
-                "confidence": _confidence_sort_key(confidence_meta),
-                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
-                "confidence_interval": confidence_meta.get("confidence_interval"),
-                "defaulted_features": pred.get("defaulted_features"),
-                "data_provenance": pred.get("data_provenance"),
                 "best_home_odds": best_home.get("odds") if best_home else None,
                 "best_away_odds": best_away.get("odds") if best_away else None,
                 "best_bet": market_eval.get("best_bet"),
             }
+            entry.update(_prediction_summary_fields(pred, prediction_contract))
 
             if market_eval.get("best_bet"):
                 entry["value_bet"] = market_eval["best_bet"]
@@ -524,8 +522,9 @@ class WorkflowEngine:
                 else self.toolkit.predict_game(opp.get("game_id", ""))
             )
             confidence_meta = prediction.get("confidence", {})
+            prediction_contract = _extract_prediction_contract(prediction)
 
-            sized_bets.append({
+            bet_entry = {
                 "game_id": opp.get("game_id"),
                 "team": opp.get("team"),
                 "side": opp.get("selection"),
@@ -537,11 +536,10 @@ class WorkflowEngine:
                 "ev_per_dollar": opp.get("expected_value"),
                 "recommended_stake": sizing.get("recommended_stake", 0),
                 "kelly_fraction": sizing.get("fraction", 0),
-                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
-                "confidence_interval": confidence_meta.get("confidence_interval"),
-                "defaulted_features": prediction.get("defaulted_features"),
-                "requires_manual_review": confidence_meta.get("reliability_grade") in {"D", "F"},
-            })
+            }
+            bet_entry.update(_prediction_summary_fields(prediction, prediction_contract))
+            bet_entry["requires_manual_review"] = _requires_manual_review(confidence_meta)
+            sized_bets.append(bet_entry)
             total_recommended += sizing.get("recommended_stake", 0)
 
         return {
@@ -840,13 +838,14 @@ class WorkflowEngine:
                 else self.toolkit.predict_game(opp.get("game_id", ""))
             )
             confidence_meta = prediction.get("confidence", {})
+            prediction_contract = _extract_prediction_contract(prediction)
 
             stake = sizing.get("recommended_stake", 0) * (kelly_mult / 0.5)  # adjust for risk
             stake = min(stake, max_stake - total_stake)  # don't exceed daily limit
             if stake <= 0:
                 continue
 
-            plays.append({
+            play_entry = {
                 "game": f"{opp.get('home_team', '')} vs {opp.get('away_team', '')}",
                 "team": opp.get("team"),
                 "side": opp.get("selection"),
@@ -857,10 +856,10 @@ class WorkflowEngine:
                 "ev_per_dollar": round(opp.get("expected_value", 0), 3),
                 "stake": round(stake, 2),
                 "to_win": round(stake * (odds - 1), 2),
-                "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
-                "defaulted_features": prediction.get("defaulted_features"),
-                "requires_manual_review": confidence_meta.get("reliability_grade") in {"D", "F"},
-            })
+            }
+            play_entry.update(_prediction_summary_fields(prediction, prediction_contract))
+            play_entry["requires_manual_review"] = _requires_manual_review(confidence_meta)
+            plays.append(play_entry)
             total_stake += stake
 
         # Expected daily P&L
@@ -965,6 +964,69 @@ def _select_target_game(games: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not games:
         return None
     return min(games, key=lambda g: (str(g.get("date", "")), str(g.get("game_id", ""))))
+
+
+def _extract_prediction_contract(prediction: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the shared prediction contract for workflow consumers."""
+    prediction_input = prediction.get("prediction_input", {}) if isinstance(prediction, dict) else {}
+    provenance = prediction_input.get("provenance", {}) if isinstance(prediction_input, dict) else {}
+    context_only = prediction_input.get("context_only", {}) if isinstance(prediction_input, dict) else {}
+    features = prediction_input.get("features", prediction.get("features", {})) if isinstance(prediction, dict) else {}
+    defaulted = set(prediction_input.get("defaulted_features", prediction.get("defaulted_features") or []))
+    model_features_used = set(prediction.get("model_features_used") or features.keys())
+    return {
+        "prediction_input": prediction_input,
+        "provenance": provenance if isinstance(provenance, dict) else {},
+        "context_only": context_only if isinstance(context_only, dict) else {},
+        "features": features if isinstance(features, dict) else {},
+        "defaulted_features": defaulted,
+        "model_features_used": model_features_used,
+    }
+
+
+def _prediction_summary_fields(
+    prediction: dict[str, Any],
+    prediction_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Shared workflow-facing summary fields derived from the prediction contract."""
+    confidence_meta = prediction.get("confidence", {}) if isinstance(prediction, dict) else {}
+    return {
+        "confidence": _confidence_sort_key(confidence_meta),
+        "confidence_grade": confidence_meta.get("reliability_grade", "unknown"),
+        "confidence_interval": confidence_meta.get("confidence_interval"),
+        "defaulted_features": sorted(prediction_contract["defaulted_features"]),
+        "data_provenance": prediction.get("data_provenance"),
+        "prediction_provenance": prediction_contract["provenance"],
+        "model_features_used": sorted(prediction_contract["model_features_used"]),
+    }
+
+
+def _prediction_workflow_fields(
+    prediction: dict[str, Any],
+    prediction_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Extended contract-backed fields for single-game workflow payloads."""
+    summary = _prediction_summary_fields(prediction, prediction_contract)
+    summary.update({
+        "prediction_input": prediction_contract["prediction_input"],
+        "confidence": prediction.get("confidence"),
+        "context_only": prediction_contract["context_only"],
+    })
+    return summary
+
+
+def _feature_is_model_active(
+    feature_name: str,
+    model_features_used: set[str],
+    defaulted_features: set[str],
+) -> bool:
+    """A workflow may narrate a feature only if the model consumed a measured value."""
+    return feature_name in model_features_used and feature_name not in defaulted_features
+
+
+def _requires_manual_review(confidence_meta: dict[str, Any]) -> bool:
+    """Conservative gate for workflows that produce action-oriented recommendations."""
+    return confidence_meta.get("reliability_grade") in {"D", "F"}
 
 
 def _confidence_sort_key(confidence_meta: dict[str, Any]) -> float:

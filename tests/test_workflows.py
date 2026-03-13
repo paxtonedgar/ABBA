@@ -88,6 +88,8 @@ class TestTonightsSlate:
             assert "confidence" in game
             assert "confidence_grade" in game
             assert "data_provenance" in game
+            assert "prediction_provenance" in game
+            assert "model_features_used" in game
             assert 0 <= game["home_win_prob"] <= 1
 
 
@@ -249,6 +251,7 @@ class TestValueScan:
         for bet in result["sized_bets"]:
             assert "confidence_grade" in bet
             assert "defaulted_features" in bet
+            assert "prediction_provenance" in bet
             assert "requires_manual_review" in bet
 
 
@@ -288,6 +291,8 @@ class TestGamePrediction:
             assert "key_factors" in result
             assert "confidence" in result
             assert "data_provenance" in result
+            assert "prediction_provenance" in result
+            assert "model_features_used" in result
             assert "best_bet" in result
             assert "context_notes" in result
 
@@ -298,6 +303,121 @@ class TestGamePrediction:
             away_goalie = result["data_provenance"]["away_goaltender"]["name"]
             assert result["home_team"]["starter"] == home_goalie
             assert result["away_team"]["starter"] == away_goalie
+
+
+class TestNarrativeContract:
+    def test_key_factors_do_not_claim_defaulted_goalie_or_rest(self, engine, monkeypatch):
+        games = engine.toolkit.storage.query_games(sport="NHL", status="scheduled")
+        if not games:
+            pytest.skip("No scheduled NHL games")
+        game = games[0]
+
+        monkeypatch.setattr(engine.toolkit, "refresh_data", lambda **kwargs: {"ok": True})
+        monkeypatch.setattr(
+            engine,
+            "_compute_rest",
+            lambda home, away: {
+                "home_rest_days": 1,
+                "away_rest_days": 3,
+                "home_b2b": True,
+                "away_b2b": False,
+            },
+        )
+        monkeypatch.setattr(
+            engine.toolkit,
+            "query_goaltender_stats",
+            lambda **kwargs: {
+                "goaltenders": [{
+                    "stats": {
+                        "name": "Test Starter",
+                        "role": "starter",
+                        "save_pct": 0.931,
+                        "gaa": 2.05,
+                        "gsaa": 14.0,
+                        "games_played": 40,
+                    }
+                }],
+                "count": 1,
+            },
+        )
+
+        def fake_prediction(game_id):
+            assert game_id == game["game_id"]
+            return {
+                "prediction": {"value": 0.58},
+                "features": {"home_st_edge": 0.03, "rest_edge": 0.0, "goaltender_edge": 0.0},
+                "confidence": {"reliability_grade": "B", "confidence_interval": {"width": 0.2}},
+                "defaulted_features": ["goaltender_edge", "rest_edge"],
+                "data_provenance": {
+                    "home_goaltender": {"name": "Test Starter", "status": "present"},
+                    "away_goaltender": {"name": "Test Starter", "status": "present"},
+                },
+                "prediction_input": {
+                    "features": {"home_st_edge": 0.03, "rest_edge": 0.0, "goaltender_edge": 0.0},
+                    "defaulted_features": ["goaltender_edge", "rest_edge"],
+                    "provenance": {"rest": {"status": "defaulted"}},
+                    "context_only": {"context_only_features": {"rest_info": {"home_rest_days": 1, "away_rest_days": 3}}},
+                },
+                "model_features_used": ["home_st_edge"],
+                "home_goaltender": "Test Starter",
+                "away_goaltender": "Test Starter",
+            }
+
+        monkeypatch.setattr(engine.toolkit, "nhl_predict_game", fake_prediction)
+
+        result = engine.run("game_prediction", game_id=game["game_id"])
+        assert "error" not in result
+        joined = " ".join(result["key_factors"])
+        assert "Elite goaltending" not in joined
+        assert "back-to-back" not in joined
+        assert "Special teams edge leans" in joined
+
+    def test_analytics_stay_in_context_notes_when_not_model_inputs(self, engine, monkeypatch):
+        games = engine.toolkit.storage.query_games(sport="NHL", status="scheduled")
+        if not games:
+            pytest.skip("No scheduled NHL games")
+        game = games[0]
+
+        monkeypatch.setattr(engine.toolkit, "refresh_data", lambda **kwargs: {"ok": True})
+
+        def fake_prediction(game_id):
+            assert game_id == game["game_id"]
+            return {
+                "prediction": {"value": 0.52},
+                "features": {
+                    "home_corsi_pct": 0.54,
+                    "away_corsi_pct": 0.48,
+                    "home_xgf_pct": 0.55,
+                    "away_xgf_pct": 0.47,
+                },
+                "confidence": {"reliability_grade": "B", "confidence_interval": {"width": 0.2}},
+                "defaulted_features": [],
+                "data_provenance": {
+                    "home_goaltender": {"name": "Goalie A", "status": "present"},
+                    "away_goaltender": {"name": "Goalie B", "status": "present"},
+                },
+                "prediction_input": {
+                    "features": {
+                        "home_corsi_pct": 0.54,
+                        "away_corsi_pct": 0.48,
+                        "home_xgf_pct": 0.55,
+                        "away_xgf_pct": 0.47,
+                    },
+                    "defaulted_features": [],
+                    "provenance": {"advanced_stats": {"status": "present"}},
+                    "context_only": {"context_only_features": {}},
+                },
+                "model_features_used": ["home_pts_pct", "away_pts_pct"],
+                "home_goaltender": "Goalie A",
+                "away_goaltender": "Goalie B",
+            }
+
+        monkeypatch.setattr(engine.toolkit, "nhl_predict_game", fake_prediction)
+
+        result = engine.run("game_prediction", game_id=game["game_id"])
+        assert "error" not in result
+        assert all("Corsi" not in factor and "xGF" not in factor for factor in result["key_factors"])
+        assert any("Corsi" in note or "xGF" in note for note in result["context_notes"])
 
 
 class TestConvenienceFunction:

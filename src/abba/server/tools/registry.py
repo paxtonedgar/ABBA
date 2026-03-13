@@ -190,10 +190,11 @@ class ToolRegistryMixin:
             {
                 "name": "refresh_data",
                 "category": "data",
-                "description": "Refresh data from live sources (NHL API, Odds API). Requires API keys for some sources.",
+                "description": "Refresh data from live sources (NHL API, MoneyPuck, SportsRadar, Odds API). Requires API keys for some sources.",
                 "params": {
                     "source": {"type": "string", "optional": True, "enum": ["sportradar", "nhl", "moneypuck", "advanced", "odds", "all"]},
                     "team": {"type": "string", "optional": True},
+                    "season": {"type": "string", "optional": True, "format": "YYYY-YY"},
                 },
             },
             {

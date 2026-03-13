@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, date
@@ -36,6 +37,7 @@ class NHLLiveConnector:
     """
 
     BASE_URL = "https://api-web.nhle.com/v1"
+    STATS_BASE_URL = "https://api.nhle.com/stats/rest/en/team"
 
     # NHL team abbreviation -> full name mapping
     TEAMS = {
@@ -51,6 +53,11 @@ class NHLLiveConnector:
         "TOR": "Toronto Maple Leafs", "UTA": "Utah Hockey Club", "VAN": "Vancouver Canucks",
         "VGK": "Vegas Golden Knights", "WSH": "Washington Capitals", "WPG": "Winnipeg Jets",
     }
+    FULL_NAME_TO_ABBREV = {full_name: abbrev for abbrev, full_name in TEAMS.items()}
+    FULL_NAME_TO_ABBREV.update({
+        "Montréal Canadiens": "MTL",
+        "Utah Mammoth": "UTA",
+    })
 
     def _fetch_json(self, url: str) -> dict[str, Any] | list[Any] | None:
         """Fetch JSON from URL. Returns None on failure, stores last error."""
@@ -72,6 +79,48 @@ class NHLLiveConnector:
             self._last_error = f"Timeout after 15s ({url})"
             return None
 
+    @staticmethod
+    def _season_to_stats_season_id(season: str) -> str | None:
+        """Convert YYYY-YY season string to NHL stats seasonId form."""
+        try:
+            start_year, end_suffix = season.split("-")
+            end_year = start_year[:2] + end_suffix
+            return f"{start_year}{end_year}"
+        except (ValueError, IndexError):
+            return None
+
+    def _fetch_special_teams_by_team(self, season: str) -> dict[str, dict[str, float]]:
+        """Fetch current-season PP/PK from the NHL stats REST endpoint."""
+        season_id = self._season_to_stats_season_id(season)
+        if not season_id:
+            return {}
+
+        query = urllib.parse.urlencode({"cayenneExp": f"seasonId={season_id} and gameTypeId=2"})
+        data = self._fetch_json(f"{self.STATS_BASE_URL}/summary?{query}")
+        if not isinstance(data, dict):
+            return {}
+
+        stats_by_team: dict[str, dict[str, float]] = {}
+        for row in data.get("data", []):
+            full_name = row.get("teamFullName")
+            abbrev = self.FULL_NAME_TO_ABBREV.get(full_name, "")
+            if not abbrev:
+                continue
+            pp_pct_raw = row.get("powerPlayPct")
+            pk_pct_raw = row.get("penaltyKillPct")
+            faceoff_pct_raw = row.get("faceoffWinPct")
+
+            pp_pct = float(pp_pct_raw) * 100 if pp_pct_raw is not None else 22.0
+            pk_pct = float(pk_pct_raw) * 100 if pk_pct_raw is not None else 80.0
+            faceoff_pct = float(faceoff_pct_raw) * 100 if faceoff_pct_raw is not None else None
+
+            stats_by_team[abbrev] = {
+                "power_play_percentage": round(pp_pct, 2),
+                "penalty_kill_percentage": round(pk_pct, 2),
+                **({"faceoff_win_percentage": round(faceoff_pct, 2)} if faceoff_pct is not None else {}),
+            }
+        return stats_by_team
+
     def refresh(self, storage: Storage, team: str | None = None) -> dict[str, Any]:
         """Pull fresh data from NHL API and store it.
 
@@ -87,6 +136,12 @@ class NHLLiveConnector:
         # 2. Today's schedule
         schedule = self._fetch_schedule(storage)
         results["schedule"] = schedule
+
+        # 2b. For live/final games, infer the actual goalie in net from gamecenter
+        # play-by-play and persist that as a per-game override.
+        confirmed_goalies = self._refresh_confirmed_goalies(storage)
+        if confirmed_goalies["games_updated"] or confirmed_goalies["games_checked"]:
+            results["confirmed_goalies"] = confirmed_goalies
 
         # 3. Determine which teams need roster + goalie data
         teams_to_fetch: set[str] = set()
@@ -115,19 +170,189 @@ class NHLLiveConnector:
 
         return results
 
+    @staticmethod
+    def _merge_metadata(existing: Any, updates: dict[str, Any]) -> dict[str, Any]:
+        """Merge game metadata dictionaries without dropping existing fields."""
+        base = existing if isinstance(existing, dict) else {}
+        return {**base, **updates}
+
+    @staticmethod
+    def _toi_to_seconds(toi: str | None) -> int:
+        """Convert MM:SS or HH:MM:SS strings to seconds."""
+        if not toi:
+            return 0
+        try:
+            parts = [int(part) for part in toi.split(":")]
+        except ValueError:
+            return 0
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return minutes * 60 + seconds
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return hours * 3600 + minutes * 60 + seconds
+        return 0
+
+    def _extract_confirmed_goalies_from_play_by_play(self, payload: dict[str, Any]) -> dict[str, str]:
+        """Infer current goalies from earliest play-by-play events with goalieInNetId."""
+        goalie_team: dict[str, str] = {}
+        for roster_spot in payload.get("rosterSpots", []):
+            if roster_spot.get("positionCode") == "G":
+                goalie_team[str(roster_spot.get("playerId", ""))] = str(roster_spot.get("teamId", ""))
+
+        starters: dict[str, str] = {}
+        for play in payload.get("plays", []):
+            goalie_id = play.get("details", {}).get("goalieInNetId")
+            if goalie_id is None:
+                continue
+            goalie_id_str = str(goalie_id)
+            team_id = goalie_team.get(goalie_id_str)
+            if not team_id or team_id in starters:
+                continue
+            starters[team_id] = goalie_id_str
+            if len(starters) >= 2:
+                break
+        return starters
+
+    def _extract_confirmed_goalies_from_boxscore(self, payload: dict[str, Any]) -> dict[str, str]:
+        """Fallback: infer goalies in use from boxscore TOI/shots faced."""
+        starters: dict[str, str] = {}
+        for side in ("homeTeam", "awayTeam"):
+            goalies = payload.get("playerByGameStats", {}).get(side, {}).get("goalies", [])
+            best_goalie = None
+            best_signal = -1
+            for goalie in goalies:
+                signal = max(
+                    self._toi_to_seconds(goalie.get("toi")),
+                    int(goalie.get("shotsAgainst", 0) or 0),
+                    int(goalie.get("saves", 0) or 0),
+                )
+                if signal > best_signal:
+                    best_signal = signal
+                    best_goalie = goalie
+            team_id = payload.get(side, {}).get("id")
+            if best_goalie and team_id is not None and best_signal > 0:
+                starters[str(team_id)] = str(best_goalie.get("playerId", ""))
+        return starters
+
+    def _fetch_confirmed_goalies_for_game(self, game_id: str) -> dict[str, Any] | None:
+        """Fetch explicit in-net goalie IDs for a live/final game if the feed exposes them."""
+        raw_game_id = game_id.removeprefix("nhl-")
+
+        play_payload = self._fetch_json(f"{self.BASE_URL}/gamecenter/{raw_game_id}/play-by-play")
+        if isinstance(play_payload, dict):
+            from_play = self._extract_confirmed_goalies_from_play_by_play(play_payload)
+            if len(from_play) >= 2:
+                return {
+                    "team_goalies": from_play,
+                    "goalie_source": "play_by_play",
+                }
+
+        box_payload = self._fetch_json(f"{self.BASE_URL}/gamecenter/{raw_game_id}/boxscore")
+        if isinstance(box_payload, dict):
+            from_box = self._extract_confirmed_goalies_from_boxscore(box_payload)
+            if len(from_box) >= 2:
+                return {
+                    "team_goalies": from_box,
+                    "goalie_source": "boxscore",
+                }
+
+        return None
+
+    def _refresh_confirmed_goalies(self, storage: Storage) -> dict[str, Any]:
+        """Persist per-game goalie overrides for today's live/final games."""
+        today = date.today().isoformat()
+        games = storage.query_games(sport="NHL", date=today, limit=200)
+        target_games = [g for g in games if g.get("status") in ("live", "final")]
+        updated = 0
+        details: list[dict[str, Any]] = []
+
+        for game in target_games:
+            inferred = self._fetch_confirmed_goalies_for_game(game["game_id"])
+            if not inferred:
+                details.append({"game_id": game["game_id"], "status": "unresolved"})
+                continue
+
+            home_team_id = str(game.get("home_team", ""))
+            away_team_id = str(game.get("away_team", ""))
+            team_goalies = inferred["team_goalies"]
+            # Map NHL numeric team ids from the feed back to stored abbreviations.
+            # We use the play-by-play payload only to identify goalie ids; the
+            # abbreviations still come from the schedule row.
+            if len(team_goalies) != 2:
+                details.append({"game_id": game["game_id"], "status": "partial"})
+                continue
+
+            # Resolve home/away goalie ids by looking at actual roster rows for the teams.
+            home_goalies = {
+                str(goalie["goaltender_id"])
+                for goalie in storage.query_goaltender_stats(team=home_team_id, season="2025-26")
+            }
+            away_goalies = {
+                str(goalie["goaltender_id"])
+                for goalie in storage.query_goaltender_stats(team=away_team_id, season="2025-26")
+            }
+            home_goalie_id = next((gid for gid in team_goalies.values() if gid in home_goalies), None)
+            away_goalie_id = next((gid for gid in team_goalies.values() if gid in away_goalies), None)
+            if not home_goalie_id or not away_goalie_id:
+                details.append({"game_id": game["game_id"], "status": "unmatched"})
+                continue
+
+            metadata = self._merge_metadata(game.get("metadata"), {
+                "home_goalie_id": home_goalie_id,
+                "away_goalie_id": away_goalie_id,
+                "goalie_source": inferred["goalie_source"],
+                "goalie_confirmed_at": datetime.now().isoformat(),
+            })
+            storage.upsert_games([{
+                "game_id": game["game_id"],
+                "sport": game["sport"],
+                "date": game["date"],
+                "home_team": game["home_team"],
+                "away_team": game["away_team"],
+                "home_score": game.get("home_score"),
+                "away_score": game.get("away_score"),
+                "venue": game.get("venue"),
+                "status": game.get("status", "scheduled"),
+                "metadata": metadata,
+                "source": game.get("source", "nhl_api"),
+            }])
+            updated += 1
+            details.append({
+                "game_id": game["game_id"],
+                "status": "ok",
+                "home_goalie_id": home_goalie_id,
+                "away_goalie_id": away_goalie_id,
+                "source": inferred["goalie_source"],
+            })
+
+        return {
+            "games_checked": len(target_games),
+            "games_updated": updated,
+            "details": details,
+        }
+
     def _fetch_standings(self, storage: Storage) -> dict[str, Any]:
         """Fetch current NHL standings and store as team stats."""
         data = self._fetch_json(f"{self.BASE_URL}/standings/now")
         if not data or "standings" not in data:
             return {"status": "failed", "error": self._last_error or "could not fetch standings"}
 
+        season_str = None
+        if data["standings"]:
+            season_id = str(data["standings"][0].get("seasonId", "20252026"))
+            season_str = f"{season_id[:4]}-{season_id[6:8]}"
+        special_teams = self._fetch_special_teams_by_team(season_str or "2025-26")
+
         team_stats = []
         for entry in data["standings"]:
             abbrev = entry.get("teamAbbrev", {}).get("default", "")
+            entry_season_id = str(entry.get("seasonId", "20252026"))
+            team_special = special_teams.get(abbrev, {})
             team_stats.append({
                 "team_id": abbrev,
                 "sport": "NHL",
-                "season": str(entry.get("seasonId", "20252026"))[:4] + "-" + str(entry.get("seasonId", "20252026"))[6:8],
+                "season": entry_season_id[:4] + "-" + entry_season_id[6:8],
                 "stats": {
                     "wins": entry.get("wins", 0),
                     "losses": entry.get("losses", 0),
@@ -155,12 +380,24 @@ class NHLLiveConnector:
                     "wild_card_sequence": entry.get("wildcardSequence", 0),
                     "points_pct": entry.get("pointPctg", 0),
                     "recent_form": entry.get("l10Wins", 0) / max(entry.get("l10Wins", 0) + entry.get("l10Losses", 0) + entry.get("l10OtLosses", 0), 1),
+                    "power_play_percentage": team_special.get("power_play_percentage", 22.0),
+                    "penalty_kill_percentage": team_special.get("penalty_kill_percentage", 80.0),
+                    **({"faceoff_win_percentage": team_special["faceoff_win_percentage"]} if "faceoff_win_percentage" in team_special else {}),
                 },
                 "source": "nhl_api",
             })
 
         stored = storage.upsert_team_stats(team_stats)
-        return {"status": "ok", "teams_updated": stored}
+        teams_with_special_teams = sum(
+            1
+            for team in team_stats
+            if "power_play_percentage" in team["stats"] and "penalty_kill_percentage" in team["stats"]
+        )
+        return {
+            "status": "ok",
+            "teams_updated": stored,
+            "special_teams_teams_updated": teams_with_special_teams,
+        }
 
     def _fetch_schedule(self, storage: Storage, game_date: str | None = None) -> dict[str, Any]:
         """Fetch NHL schedule for today (or specified date) and store games."""

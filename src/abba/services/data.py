@@ -22,6 +22,7 @@ class DataService:
         self,
         source: str = "all",
         team: str | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Refresh data from live sources.
 
@@ -38,7 +39,17 @@ class DataService:
             sr = SportsRadarConnector()
             if sr.api_key:
                 try:
-                    sr_result = sr.refresh(self.storage, team=team)
+                    season_year = None
+                    if season:
+                        try:
+                            season_year = int(season.split("-")[0])
+                        except (ValueError, IndexError):
+                            return {
+                                "refreshed_sources": [],
+                                "details": {},
+                                "errors": {"season": f"Invalid season format: {season}. Expected YYYY-YY."},
+                            }
+                    sr_result = sr.refresh(self.storage, team=team, season_year=season_year or 2025)
                     results["sportradar"] = sr_result
                 except Exception as e:
                     results["sportradar"] = {"error": str(e)}
@@ -56,7 +67,7 @@ class DataService:
             if source in ("moneypuck", "advanced", "all"):
                 mp = MoneyPuckConnector()
                 try:
-                    mp_result = mp.refresh(self.storage, team=team)
+                    mp_result = mp.refresh(self.storage, season=season or "2025-26", team=team)
                     results["moneypuck"] = mp_result
                 except Exception as e:
                     results["moneypuck"] = {"error": str(e)}
@@ -94,6 +105,8 @@ class DataService:
             "refreshed_sources": list(results.keys()),
             "details": results,
         }
+        if season:
+            result["season"] = season
         if errors:
             result["errors"] = errors
             result["warning"] = "Some data sources failed to refresh. Predictions may use stale data."

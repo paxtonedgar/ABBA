@@ -6,6 +6,7 @@ work independently with injected dependencies.
 
 import pytest
 
+from abba.connectors.live import NHLLiveConnector
 from abba.connectors.seed import seed_sample_data
 from abba.engine.elo import EloRatings
 from abba.engine.ensemble import EnsembleEngine
@@ -101,6 +102,82 @@ class TestPredictionService:
         assert "team_stats" in prediction_input["provenance"]
         assert "odds" in prediction_input["provenance"]
 
+    def test_predict_nhl_derives_rest_edge_from_schedule(self, prediction_service, db):
+        games = db.query_games(sport="NHL", status="scheduled")
+        if not games:
+            pytest.skip("No scheduled NHL games in seed data")
+
+        result = prediction_service.predict_nhl(games[0]["game_id"])
+        assert "error" not in result
+
+        prediction_input = result["prediction_input"]
+        rest_provenance = prediction_input["provenance"]["rest"]
+        assert rest_provenance["status"] == "present"
+        assert "rest_edge" not in (result.get("defaulted_features") or [])
+        assert "rest_edge" in prediction_input["features"]
+        assert "rest_info" in result["context_only"]["context_only_features"]
+
+    def test_predict_nhl_prefers_game_level_goalie_override(self, prediction_service, db):
+        games = db.query_games(sport="NHL", status="scheduled")
+        if not games:
+            pytest.skip("No scheduled NHL games in seed data")
+
+        game = games[0]
+        db.upsert_goaltender_stats([
+            {
+                "goaltender_id": "override-home-goalie",
+                "team": game["home_team"],
+                "season": "2025-26",
+                "stats": {
+                    "name": "Override Home",
+                    "games_played": 4,
+                    "games_started": 2,
+                    "save_pct": 0.931,
+                    "gaa": 2.10,
+                    "gsaa": 8.0,
+                },
+            },
+            {
+                "goaltender_id": "override-away-goalie",
+                "team": game["away_team"],
+                "season": "2025-26",
+                "stats": {
+                    "name": "Override Away",
+                    "games_played": 3,
+                    "games_started": 1,
+                    "save_pct": 0.889,
+                    "gaa": 3.60,
+                    "gsaa": -7.0,
+                },
+            },
+        ])
+        db.upsert_games([{
+            "game_id": game["game_id"],
+            "sport": game["sport"],
+            "date": game["date"],
+            "home_team": game["home_team"],
+            "away_team": game["away_team"],
+            "home_score": game.get("home_score"),
+            "away_score": game.get("away_score"),
+            "venue": game.get("venue"),
+            "status": game.get("status", "scheduled"),
+            "metadata": {
+                **(game.get("metadata") or {}),
+                "home_goalie_id": "override-home-goalie",
+                "away_goalie_id": "override-away-goalie",
+                "goalie_source": "test_override",
+            },
+            "source": game.get("source", "seed"),
+        }])
+
+        result = prediction_service.predict_nhl(game["game_id"])
+
+        assert result["home_goaltender"] == "Override Home"
+        assert result["away_goaltender"] == "Override Away"
+        assert result["data_provenance"]["home_goaltender"]["selection_method"] == "game_metadata_override"
+        assert result["data_provenance"]["away_goaltender"]["selection_method"] == "game_metadata_override"
+        assert result["prediction_input"]["provenance"]["goaltenders"]["source"] == "game_metadata_override"
+
     def test_predict_nhl_missing_game(self, prediction_service):
         result = prediction_service.predict_nhl("nonexistent-game-id")
         assert "error" in result
@@ -186,3 +263,120 @@ class TestDataService:
 
     def test_data_service_has_storage(self, data_service):
         assert data_service.storage is not None
+
+
+class TestNHLLiveConnector:
+    def test_extract_confirmed_goalies_from_play_by_play(self):
+        connector = NHLLiveConnector()
+        payload = {
+            "rosterSpots": [
+                {"teamId": 6, "playerId": 1001, "positionCode": "G"},
+                {"teamId": 6, "playerId": 1002, "positionCode": "G"},
+                {"teamId": 28, "playerId": 2001, "positionCode": "G"},
+                {"teamId": 28, "playerId": 2002, "positionCode": "G"},
+            ],
+            "plays": [
+                {"eventId": 1, "details": {"goalieInNetId": 2001}},
+                {"eventId": 2, "details": {"goalieInNetId": 1002}},
+                {"eventId": 3, "details": {"goalieInNetId": 2002}},
+            ],
+        }
+
+        starters = connector._extract_confirmed_goalies_from_play_by_play(payload)
+
+        assert starters == {"28": "2001", "6": "1002"}
+
+    def test_fetch_special_teams_by_team_scales_percentages(self, monkeypatch):
+        connector = NHLLiveConnector()
+
+        def fake_fetch_json(url):
+            assert "20252026" in url
+            return {
+                "data": [
+                    {
+                        "teamFullName": "New York Rangers",
+                        "powerPlayPct": 0.24321,
+                        "penaltyKillPct": 0.81234,
+                        "faceoffWinPct": 0.51789,
+                    },
+                    {
+                        "teamFullName": "Boston Bruins",
+                        "powerPlayPct": 0.19876,
+                        "penaltyKillPct": 0.775,
+                        "faceoffWinPct": None,
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(connector, "_fetch_json", fake_fetch_json)
+
+        stats = connector._fetch_special_teams_by_team("2025-26")
+
+        assert stats["NYR"]["power_play_percentage"] == 24.32
+        assert stats["NYR"]["penalty_kill_percentage"] == 81.23
+        assert stats["NYR"]["faceoff_win_percentage"] == 51.79
+        assert stats["BOS"]["power_play_percentage"] == 19.88
+        assert stats["BOS"]["penalty_kill_percentage"] == 77.5
+        assert "faceoff_win_percentage" not in stats["BOS"]
+
+    def test_fetch_standings_merges_special_teams(self, db, monkeypatch):
+        connector = NHLLiveConnector()
+
+        def fake_fetch_json(url):
+            if "standings/now" in url:
+                return {
+                    "standings": [
+                        {
+                            "teamAbbrev": {"default": "NYR"},
+                            "seasonId": 20252026,
+                            "wins": 40,
+                            "losses": 20,
+                            "otLosses": 5,
+                            "points": 85,
+                            "goalFor": 220,
+                            "goalAgainst": 180,
+                            "goalDifferential": 40,
+                            "gamesPlayed": 65,
+                            "regulationWins": 30,
+                            "streakCode": "W",
+                            "streakCount": 3,
+                            "homeWins": 20,
+                            "homeLosses": 10,
+                            "homeOtLosses": 2,
+                            "roadWins": 20,
+                            "roadLosses": 10,
+                            "roadOtLosses": 3,
+                            "l10Wins": 7,
+                            "l10Losses": 2,
+                            "l10OtLosses": 1,
+                            "divisionName": "Metropolitan",
+                            "conferenceName": "Eastern",
+                            "teamName": {"default": "New York Rangers"},
+                            "wildcardSequence": 0,
+                            "pointPctg": 0.654,
+                        }
+                    ]
+                }
+            if "stats/rest/en/team/summary" in url:
+                return {
+                    "data": [
+                        {
+                            "teamFullName": "New York Rangers",
+                            "powerPlayPct": 0.241,
+                            "penaltyKillPct": 0.815,
+                            "faceoffWinPct": 0.521,
+                        }
+                    ]
+                }
+            raise AssertionError(f"Unexpected URL {url}")
+
+        monkeypatch.setattr(connector, "_fetch_json", fake_fetch_json)
+
+        result = connector._fetch_standings(db)
+        stored = db.query_team_stats(team_id="NYR", sport="NHL", season="2025-26")
+
+        assert result["status"] == "ok"
+        assert result["special_teams_teams_updated"] == 1
+        assert stored[0]["stats"]["power_play_percentage"] == 24.1
+        assert stored[0]["stats"]["penalty_kill_percentage"] == 81.5
+        assert stored[0]["stats"]["faceoff_win_percentage"] == 52.1

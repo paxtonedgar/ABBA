@@ -252,9 +252,9 @@ def playoff_odds(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def refresh_data(source: str = "all", team: str | None = None) -> str:
-    """Refresh data from live sources — NHL API (free, no key) and Odds API (needs ODDS_API_KEY). Call this first!"""
-    result = _toolkit.refresh_data(source=source, team=team)
+def refresh_data(source: str = "all", team: str | None = None, season: str | None = None) -> str:
+    """Refresh data from live sources — NHL API, MoneyPuck, SportsRadar, and Odds API. Call this first!"""
+    result = _toolkit.refresh_data(source=source, team=team, season=season)
     return json.dumps(result, default=str)
 
 

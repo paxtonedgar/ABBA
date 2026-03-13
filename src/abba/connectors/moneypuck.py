@@ -33,6 +33,8 @@ _MONEYPUCK_TO_ABBREV: dict[str, str] = {
     # Legacy / alternate forms seen in MoneyPuck data
     "L.A.": "LAK", "N.J.": "NJD", "S.J.": "SJS", "T.B.": "TBL",
     "LA": "LAK", "NJ": "NJD", "SJ": "SJS", "TB": "TBL",
+    # Current 2025-26 team CSV uses canonical NHL abbreviations for these teams.
+    "LAK": "LAK", "NJD": "NJD", "SJS": "SJS", "TBL": "TBL",
 }
 
 # CSV URL template. {year} is the starting year of the season (e.g. 2025 for 2025-26).
@@ -77,6 +79,20 @@ class MoneyPuckConnector:
         except (ValueError, TypeError):
             return default
 
+    @staticmethod
+    def _normalize_percentage(value: float, default: float = 50.0) -> float:
+        """Normalize MoneyPuck percentage fields to a 0-100 scale.
+
+        Current CSVs use 0-1 fractions (for example 0.46), but some historical
+        tests and earlier assumptions treated them as 0-100. Accept both so the
+        connector stays stable across seasons.
+        """
+        if value < 0:
+            return default
+        if value <= 1.0:
+            return value * 100.0
+        return value
+
     def parse_team_stats(self, rows: list[dict[str, str]], season: str) -> list[dict[str, Any]]:
         """Parse MoneyPuck CSV rows into advanced stats records.
 
@@ -96,25 +112,24 @@ class MoneyPuckConnector:
                 continue
 
             sf = self._safe_float
-            # Shot attempts
-            cf = sf(row, "flurryScoreVenueAdjustedxGoalsFor")  # score-venue adjusted xGF
-            ca = sf(row, "flurryScoreVenueAdjustedxGoalsAgainst")
 
-            # Raw Corsi (shot attempts for/against)
-            corsi_for = sf(row, "corsiPercentage", 50.0)
-            # MoneyPuck provides corsiPercentage directly as 0-100
-            # But some seasons use different column names -- fall back to computing
+            # MoneyPuck percentage columns are currently fractional 0-1 values.
+            corsi_pct = self._normalize_percentage(sf(row, "corsiPercentage", 0.5))
             shots_for = sf(row, "shotsOnGoalFor")
             shots_against = sf(row, "shotsOnGoalAgainst")
 
             # Fenwick
-            fenwick_pct = sf(row, "fenwickPercentage", 50.0)
+            fenwick_pct = self._normalize_percentage(sf(row, "fenwickPercentage", 0.5))
 
             # xG
             xgf = sf(row, "xGoalsFor")
             xga = sf(row, "xGoalsAgainst")
-            xgf_total = xgf + xga
-            xgf_pct = (xgf / xgf_total * 100) if xgf_total > 0 else 50.0
+            xgf_pct_raw = sf(row, "xGoalsPercentage", -1.0)
+            if xgf_pct_raw >= 0:
+                xgf_pct = self._normalize_percentage(xgf_pct_raw, 50.0)
+            else:
+                xgf_total = xgf + xga
+                xgf_pct = (xgf / xgf_total * 100) if xgf_total > 0 else 50.0
 
             # Shooting and save percentages
             goals_for = sf(row, "goalsFor")
@@ -135,7 +150,7 @@ class MoneyPuckConnector:
                 "team_id": abbrev,
                 "season": season,
                 "stats": {
-                    "corsi_pct": round(corsi_for, 2),
+                    "corsi_pct": round(corsi_pct, 2),
                     "fenwick_pct": round(fenwick_pct, 2),
                     "xgf_pct": round(xgf_pct, 2),
                     "xgf": round(xgf, 2),

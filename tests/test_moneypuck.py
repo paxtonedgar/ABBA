@@ -3,6 +3,7 @@
 import pytest
 
 from abba.connectors.moneypuck import MoneyPuckConnector, _MONEYPUCK_TO_ABBREV
+from abba.services.data import DataService
 from abba.storage import Storage
 
 
@@ -138,6 +139,28 @@ class TestParseTeamStats:
         for r in records:
             assert r["season"] == "2024-25"
 
+    def test_fractional_percentages_are_scaled_to_100(self, connector):
+        rows = [{
+            "team": "CHI",
+            "situation": "5on5",
+            "corsiPercentage": "0.46",
+            "fenwickPercentage": "0.47",
+            "xGoalsPercentage": "0.44",
+            "xGoalsFor": "114.26",
+            "xGoalsAgainst": "144.13",
+            "shotsOnGoalFor": "1228.0",
+            "shotsOnGoalAgainst": "1495.0",
+            "goalsFor": "117.0",
+            "goalsAgainst": "146.0",
+            "iceTime": "190768.0",
+        }]
+        records = connector.parse_team_stats(rows, "2025-26")
+        assert len(records) == 1
+        stats = records[0]["stats"]
+        assert stats["corsi_pct"] == 46.0
+        assert stats["fenwick_pct"] == 47.0
+        assert stats["xgf_pct"] == 44.0
+
 
 class TestTeamNameMapping:
     """Verify all 32 NHL teams are covered."""
@@ -163,6 +186,12 @@ class TestTeamNameMapping:
     def test_plain_variants_resolve(self):
         assert _MONEYPUCK_TO_ABBREV["LA"] == "LAK"
         assert _MONEYPUCK_TO_ABBREV["NJ"] == "NJD"
+
+    def test_canonical_abbrevs_resolve(self):
+        assert _MONEYPUCK_TO_ABBREV["LAK"] == "LAK"
+        assert _MONEYPUCK_TO_ABBREV["NJD"] == "NJD"
+        assert _MONEYPUCK_TO_ABBREV["SJS"] == "SJS"
+        assert _MONEYPUCK_TO_ABBREV["TBL"] == "TBL"
 
 
 class TestStorageRoundTrip:
@@ -210,3 +239,25 @@ class TestRefreshGracefulFailure:
         # Simulate: CSV fetched but no 5on5 rows
         records = connector.parse_team_stats([], "2025-26")
         assert records == []
+
+
+class TestDataServiceRefresh:
+    def test_refresh_forwards_season_to_moneypuck(self, db, monkeypatch):
+        captured: dict[str, object] = {}
+
+        def fake_refresh(self, storage, season="2025-26", team=None):
+            captured["storage"] = storage
+            captured["season"] = season
+            captured["team"] = team
+            return {"status": "ok", "teams_updated": 32, "season": season, "source": "moneypuck"}
+
+        monkeypatch.setattr("abba.connectors.moneypuck.MoneyPuckConnector.refresh", fake_refresh)
+
+        service = DataService(db)
+        result = service.refresh(source="moneypuck", team="NYR", season="2024-25")
+
+        assert captured["storage"] is db
+        assert captured["season"] == "2024-25"
+        assert captured["team"] == "NYR"
+        assert result["season"] == "2024-25"
+        assert result["details"]["moneypuck"]["season"] == "2024-25"
