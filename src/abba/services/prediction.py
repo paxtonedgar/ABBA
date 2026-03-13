@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..engine.confidence import build_prediction_meta
+from ..engine.calibration import apply_temperature
+from ..engine.confidence import build_prediction_meta, get_calibration_artifact
 from ..engine.elo import EloRatings
 from ..engine.ensemble import EnsembleEngine
 from ..engine.features import FeatureEngine
@@ -107,6 +108,14 @@ class PredictionService:
         # Combine
         prediction = self.ensemble.combine(model_preds, method=method)
 
+        # Temperature scaling: recalibrate raw probability using empirical T
+        raw_value = prediction.to_dict()["value"]
+        cal_artifact = get_calibration_artifact()
+        if cal_artifact and cal_artifact.temperature != 1.0:
+            from dataclasses import replace
+            calibrated = float(apply_temperature([raw_value], cal_artifact.temperature)[0])
+            prediction = replace(prediction, value=calibrated)
+
         # Confidence metadata
         data_source = prepared.data_source
         has_goalie = home_goalie is not None and away_goalie is not None
@@ -132,6 +141,12 @@ class PredictionService:
             "sport": "NHL",
             "season": season,
             "prediction": prediction.to_dict(),
+            "raw_model_prob": round(raw_value, 4),
+            "calibration": {
+                "temperature": round(cal_artifact.temperature, 4) if cal_artifact else 1.0,
+                "applied": cal_artifact is not None and cal_artifact.temperature != 1.0,
+                "backtest_sample": cal_artifact.sample_size if cal_artifact else 0,
+            },
             "features": {k: round(v, 4) for k, v in features.items()},
             "home_goaltender": home_goalie.get("name") if home_goalie else "unknown",
             "away_goaltender": away_goalie.get("name") if away_goalie else "unknown",
