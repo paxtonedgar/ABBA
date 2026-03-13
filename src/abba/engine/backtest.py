@@ -147,6 +147,9 @@ class WalkForwardBacktest:
         self,
         games: list[dict[str, Any]],
         market_odds: dict[str, float] | None = None,
+        advanced_stats: dict[str, dict[str, Any]] | None = None,
+        goalie_starts: dict[str, dict[str, Any]] | None = None,
+        goalie_stats: dict[str, dict[str, Any]] | None = None,
     ) -> list[BacktestResult]:
         """Run walk-forward backtest on a chronologically sorted list of games.
 
@@ -156,6 +159,12 @@ class WalkForwardBacktest:
                 Must be sorted by date ascending.
             market_odds: Optional dict of {game_id: implied_home_prob} for
                 market baseline comparison.
+            advanced_stats: Optional dict of {team_abbrev: {corsi_pct, xgf_pct, ...}}
+                Season-level 5v5 advanced stats (e.g. from MoneyPuck).
+            goalie_starts: Optional dict of {game_id: {home_goalie_id, away_goalie_id, ...}}
+                Starting goalie identity per game.
+            goalie_stats: Optional dict of {player_id_str: {save_pct, gaa, ...}}
+                Season goalie stats keyed by player ID string.
 
         Returns:
             List of BacktestResult objects.
@@ -182,8 +191,29 @@ class WalkForwardBacktest:
             home_stats = self._build_pre_game_stats(home)
             away_stats = self._build_pre_game_stats(away)
 
+            # Advanced stats (season-level, treat as constant)
+            home_adv = advanced_stats.get(home) if advanced_stats else None
+            away_adv = advanced_stats.get(away) if advanced_stats else None
+
+            # Goaltender stats for this game's starters
+            home_goalie_stats = None
+            away_goalie_stats = None
+            game_id = game.get("game_id", "")
+            if goalie_starts and goalie_stats and game_id in goalie_starts:
+                gs = goalie_starts[game_id]
+                hgid = str(gs.get("home_goalie_id", ""))
+                agid = str(gs.get("away_goalie_id", ""))
+                if hgid in goalie_stats:
+                    home_goalie_stats = goalie_stats[hgid]
+                if agid in goalie_stats:
+                    away_goalie_stats = goalie_stats[agid]
+
             features = self.hockey.build_nhl_features(
                 home_stats, away_stats,
+                home_advanced=home_adv,
+                away_advanced=away_adv,
+                home_goalie=home_goalie_stats,
+                away_goalie=away_goalie_stats,
             )
 
             # Step 1b: Compute rest edge from schedule history (pre-game)
