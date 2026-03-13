@@ -150,6 +150,7 @@ class WalkForwardBacktest:
         advanced_stats: dict[str, dict[str, Any]] | None = None,
         goalie_starts: dict[str, dict[str, Any]] | None = None,
         goalie_stats: dict[str, dict[str, Any]] | None = None,
+        special_teams: dict[str, dict[str, float]] | None = None,
     ) -> list[BacktestResult]:
         """Run walk-forward backtest on a chronologically sorted list of games.
 
@@ -165,6 +166,8 @@ class WalkForwardBacktest:
                 Starting goalie identity per game.
             goalie_stats: Optional dict of {player_id_str: {save_pct, gaa, ...}}
                 Season goalie stats keyed by player ID string.
+            special_teams: Optional dict of {team_abbrev: {power_play_percentage, penalty_kill_percentage}}
+                Season-level PP/PK from NHL stats API.
 
         Returns:
             List of BacktestResult objects.
@@ -186,6 +189,16 @@ class WalkForwardBacktest:
                 game_dt = date.fromisoformat(game_date_str)
             except (ValueError, TypeError):
                 game_dt = None
+
+            # Inject special teams into running stats (season-level, pre-game)
+            if special_teams:
+                for team_abbrev in (home, away):
+                    st = special_teams.get(team_abbrev)
+                    if st:
+                        self._running_stats[team_abbrev]["power_play_percentage"] = st.get(
+                            "power_play_percentage", 22.0)
+                        self._running_stats[team_abbrev]["penalty_kill_percentage"] = st.get(
+                            "penalty_kill_percentage", 80.0)
 
             # Step 1: Build features from PRE-GAME data only
             home_stats = self._build_pre_game_stats(home)
