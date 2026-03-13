@@ -76,6 +76,7 @@ class WalkForwardBacktest:
         self._running_stats: dict[str, dict[str, Any]] = defaultdict(
             lambda: self._neutral_stats()
         )
+        self._team_game_dates: dict[str, list[date]] = defaultdict(list)
         self.results: list[BacktestResult] = []
 
     @staticmethod
@@ -170,6 +171,13 @@ class WalkForwardBacktest:
             if home_score is None or away_score is None:
                 continue
 
+            # Parse game date for rest calculation
+            game_date_str = str(game.get("date", ""))
+            try:
+                game_dt = date.fromisoformat(game_date_str)
+            except (ValueError, TypeError):
+                game_dt = None
+
             # Step 1: Build features from PRE-GAME data only
             home_stats = self._build_pre_game_stats(home)
             away_stats = self._build_pre_game_stats(away)
@@ -177,6 +185,28 @@ class WalkForwardBacktest:
             features = self.hockey.build_nhl_features(
                 home_stats, away_stats,
             )
+
+            # Step 1b: Compute rest edge from schedule history (pre-game)
+            if game_dt:
+                home_history = self._team_game_dates[home]
+                away_history = self._team_game_dates[away]
+                if home_history and away_history:
+                    home_last = home_history[-1]
+                    away_last = away_history[-1]
+                    home_rest = (game_dt - home_last).days
+                    away_rest = (game_dt - away_last).days
+                    week_ago = game_dt - timedelta(days=7)
+                    home_g7 = sum(1 for d in home_history if d > week_ago)
+                    away_g7 = sum(1 for d in away_history if d > week_ago)
+                    rest_info = self.hockey.rest_advantage(
+                        home_rest_days=home_rest,
+                        away_rest_days=away_rest,
+                        home_is_back_to_back=home_rest <= 1,
+                        away_is_back_to_back=away_rest <= 1,
+                        home_games_last_7=home_g7,
+                        away_games_last_7=away_g7,
+                    )
+                    features["rest_edge"] = rest_info["rest_edge"]
 
             # Step 2: Elo prediction (also pre-game)
             elo_pred = self.elo.predict(home, away)
@@ -206,8 +236,11 @@ class WalkForwardBacktest:
                 market_prob=market_prob,
             ))
 
-            # Step 5: Update running stats and Elo AFTER recording prediction
+            # Step 5: Update running stats, schedule history, and Elo AFTER recording
             self._update_running_stats(home, away, home_score, away_score)
+            if game_dt:
+                self._team_game_dates[home].append(game_dt)
+                self._team_game_dates[away].append(game_dt)
             self.elo.update(home, away, home_score, away_score)
 
         return self.results

@@ -1,34 +1,34 @@
 {
-  "log_loss": 0.6881,
-  "brier_score": 0.2475,
-  "accuracy": 0.5275,
+  "log_loss": 0.6875,
+  "brier_score": 0.2472,
+  "accuracy": 0.5304,
   "sample_size": 1037,
-  "temperature": 4.0894,
-  "ece": 0.0406,
+  "temperature": 3.2839,
+  "ece": 0.034,
   "reliability_bins": [
     {
       "bin_low": 0.4,
       "bin_high": 0.5,
-      "count": 167,
-      "predicted_mean": 0.4727,
-      "observed_frequency": 0.491,
-      "calibration_error": 0.0183
+      "count": 162,
+      "predicted_mean": 0.4723,
+      "observed_frequency": 0.4815,
+      "calibration_error": 0.0092
     },
     {
       "bin_low": 0.5,
       "bin_high": 0.6,
-      "count": 751,
-      "predicted_mean": 0.5483,
-      "observed_frequency": 0.506,
-      "calibration_error": 0.0423
+      "count": 749,
+      "predicted_mean": 0.5487,
+      "observed_frequency": 0.51,
+      "calibration_error": 0.0387
     },
     {
       "bin_low": 0.6,
       "bin_high": 0.7,
-      "count": 118,
-      "predicted_mean": 0.6277,
-      "observed_frequency": 0.6864,
-      "calibration_error": 0.0588
+      "count": 125,
+      "predicted_mean": 0.6278,
+      "observed_frequency": 0.664,
+      "calibration_error": 0.0362
     },
     {
       "bin_low": 0.7,
